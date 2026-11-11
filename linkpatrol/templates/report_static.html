@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}linkpatrol report · run {{ run.id }}{% endblock %}
+{% block nav %}<span class="muted">Static report</span>{% endblock %}
+{% block content %}
+<h1>Link health report · run #{{ run.id }}</h1>
+<p class="muted"><code>{{ run.seed }}</code> · {{ run.started_at }} · generated {{ generated_at }}</p>
+
+<div class="cards">
+  <div class="card"><span>Pages</span><b>{{ summary.pages }}</b></div>
+  <div class="card"><span>Reachable</span><b>{{ summary.reachable_pages }}</b></div>
+  <div class="card"><span>Broken</span><b class="{{ 'bad' if summary.broken else 'ok' }}">{{ summary.broken }}</b></div>
+  <div class="card"><span>Redirects</span><b>{{ summary.redirects }}</b></div>
+  <div class="card"><span>Anchor failures</span><b>{{ summary.anchor_failures }}</b></div>
+  <div class="card"><span>Orphans</span><b>{{ summary.orphan }}</b></div>
+  <div class="card"><span>Dead ends</span><b>{{ summary.dead_ends }}</b></div>
+</div>
+
+<h2>Broken links</h2>
+{% if broken %}
+{% for source, group in broken|groupby("source_url") %}
+  <h3><code>{{ source }}</code></h3>
+  <table>
+    <thead><tr><th>Target</th><th>Raw href</th><th>Status</th><th>Error</th><th>Line</th></tr></thead>
+    <tbody>
+    {% for item in group %}
+      <tr>
+        <td><code>{{ item.target_url }}</code></td>
+        <td><code>{{ item.raw_href }}</code></td>
+        <td>{{ item.status_code if item.status_code is not none else "—" }}</td>
+        <td class="bad">{{ item.error or "" }}</td>
+        <td>{{ item.line_no }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endfor %}
+{% else %}
+<div class="empty">No broken links were found.</div>
+{% endif %}
+
+<h2>Redirects</h2>
+{% if redirects %}
+<table>
+  <thead><tr><th>Start URL</th><th>Final URL</th><th>Chain</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for item in redirects %}
+    <tr>
+      <td><code>{{ item.url }}</code></td>
+      <td><code>{{ item.final_url }}</code></td>
+      <td>{% for hop in item.chain %}{{ hop.status }} → <code>{{ hop.location }}</code>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+      <td class="{{ 'warn' if item.warning else '' }}">{{ item.status_code }}{% if item.warning %} (long){% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No redirects observed.</div>
+{% endif %}
+
+<h2>Missing anchors</h2>
+{% if anchors %}
+<table>
+  <thead><tr><th>Source</th><th>Target</th><th>Anchor</th><th>Line</th></tr></thead>
+  <tbody>
+  {% for item in anchors %}
+    <tr><td><code>{{ item.source_url }}</code></td><td><code>{{ item.target_url }}</code></td>
+      <td><code>#{{ item.anchor }}</code></td><td>{{ item.line_no }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">All checked anchors exist.</div>
+{% endif %}
+
+<h2>Orphans and unlisted pages</h2>
+<h3>Orphan (listed but unreachable) · {{ orphans.orphan|length }}</h3>
+{% if orphans.orphan %}<ul>{% for url in orphans.orphan %}<li><code>{{ url }}</code></li>{% endfor %}</ul>
+{% else %}<div class="empty">None.</div>{% endif %}
+<h3>Unlisted (reachable but absent from sitemap) · {{ orphans.unlisted|length }}</h3>
+{% if orphans.unlisted %}<ul>{% for url in orphans.unlisted %}<li><code>{{ url }}</code></li>{% endfor %}</ul>
+{% else %}<div class="empty">None.</div>{% endif %}
+
+<h2>Dead ends · {{ dead_ends|length }}</h2>
+{% if dead_ends %}<ul>{% for url in dead_ends %}<li><code>{{ url }}</code></li>{% endfor %}</ul>
+{% else %}<div class="empty">None.</div>{% endif %}
+{% endblock %}

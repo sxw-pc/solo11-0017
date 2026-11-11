@@ -1,0 +1,32 @@
+# Demo scan used by README quick start.
+# The target is an HTTP service running on this machine only.
+seed = "http://127.0.0.1:5001/"
+
+[scope]
+allow_subdomains = false
+include = []
+exclude = ["^/search"]
+
+[limits]
+max_depth = 3
+max_pages = 60
+timeout_s = 3.0
+retries = 2
+delay_ms = 20
+concurrency = 1
+max_redirects = 5
+
+[robots]
+respect = true
+user_agent = "linkpatrol-demo/0.1"
+
+[external]
+check = true
+
+[normalize]
+drop_params = ["utm_*", "fbclid"]
+
+[output]
+dir = "reports"
+database = "out/linkpatrol.db"
+sitemap = "out/sitemap.xml"

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} · linkpatrol{% endblock %}
+{% block content %}
+<p><a href="/">← All runs</a></p>
+<h1>Run #{{ run.id }}</h1>
+<p class="muted"><code>{{ run.seed }}</code> · {{ run.status }} · started {{ run.started_at }}
+  {% if run.finished_at %} · finished {{ run.finished_at }}{% endif %}</p>
+
+<div class="cards">
+  <div class="card"><span>Pages</span><b>{{ pages|length }}</b></div>
+  <div class="card"><span>Broken</span><b class="{{ 'bad' if broken_count else 'ok' }}">{{ broken_count }}</b></div>
+  <div class="card"><span>Checks</span><b>{{ run.stats.get("checks", 0) }}</b></div>
+  <div class="card"><span>Warnings</span><b class="warn">{{ run.stats.get("warnings", 0) }}</b></div>
+  <div class="card"><span>Sitemap URLs</span><b>{{ run.stats.get("sitemap_urls", 0) }}</b></div>
+</div>
+
+<form class="filters" method="get" action="/runs/{{ run.id }}">
+  <div><label for="status">HTTP status</label>
+    <input id="status" name="status" size="6" value="{{ filters.status if filters.status is not none else '' }}"></div>
+  <div><label for="kind">Link kind</label>
+    <select id="kind" name="kind">
+      <option value="">all</option>
+      {% for option in ["page", "asset", "form"] %}
+      <option value="{{ option }}" {% if filters.kind == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select></div>
+  <div><label for="q">URL contains</label>
+    <input id="q" name="q" value="{{ filters.q }}"></div>
+  <button type="submit">Filter</button>
+  <a href="/runs/{{ run.id }}">Reset</a>
+</form>
+
+<h2>Pages</h2>
+{% if pages %}
+<table>
+  <thead><tr><th>ID</th><th>URL</th><th>Depth</th><th>Status</th>
+    <th>Duration</th><th>Hash</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for page in pages %}
+    <tr>
+      <td>{{ page.id }}</td>
+      <td><a href="/pages/{{ page.id }}"><code>{{ page.url }}</code></a></td>
+      <td>{{ page.depth }}</td>
+      <td>{{ page.status_code if page.status_code is not none else "—" }}</td>
+      <td>{{ page.duration_ms }} ms</td>
+      <td><code>{{ page.content_hash[:12] }}</code></td>
+      <td class="muted">{{ page.error or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No pages match these filters.</div>
+{% endif %}
+
+<h2>Links and checks</h2>
+{% if links %}
+<table>
+  <thead><tr><th>Source</th><th>Target</th><th>Kind</th><th>Scope</th>
+    <th>Line</th><th>Status</th><th>Result</th></tr></thead>
+  <tbody>
+  {% for link in links %}
+    <tr>
+      <td><code>{{ link.source_url }}</code></td>
+      <td><code>{{ link.target_url }}</code></td>
+      <td>{{ link.kind }}</td>
+      <td>{{ link.scope }}</td>
+      <td>{{ link.line_no }}</td>
+      <td>{{ link.check.get("status_code", "—") }}</td>
+      <td>
+        {% if link.check %}
+          {% if link.check.ok %}<span class="ok">ok</span>
+          {% else %}<span class="bad">broken</span>{% endif %}
+          {% if link.check.error %}<span class="muted"> · {{ link.check.error }}</span>{% endif %}
+        {% else %}<span class="muted">not checked</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No links match these filters.</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Scan runs</h1>
+{% if runs %}
+<table>
+  <thead><tr><th>Run</th><th>Seed</th><th>Status</th><th>Started</th>
+    <th>Pages</th><th>Broken</th><th></th></tr></thead>
+  <tbody>
+  {% for run in runs %}
+    <tr>
+      <td>#{{ run.id }}</td>
+      <td><code>{{ run.seed }}</code></td>
+      <td><span class="pill">{{ run.status }}</span></td>
+      <td class="muted">{{ run.started_at }}</td>
+      <td>{{ run.stats.get("crawl", {}).get("fetched", "—") }}</td>
+      <td class="{{ 'bad' if run.stats.get('broken', 0) else 'ok' }}">
+        {{ run.stats.get("broken", "—") }}</td>
+      <td><a href="/runs/{{ run.id }}">Overview</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No runs yet. Start the demo site, then run a scan.</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linkpatrol"
+version = "0.1.0"
+description = "Offline, bounded website link health inspection and sitemap toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "linkpatrol maintainers"}]
+dependencies = ["Flask>=3.0,<4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+linkpatrol = "linkpatrol.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["linkpatrol*"]
+
+[tool.setuptools.package-data]
+linkpatrol = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::DeprecationWarning:linkpatrol.*",
+]
+
+[tool.coverage.run]
+source = ["linkpatrol"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

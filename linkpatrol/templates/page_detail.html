@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Page · linkpatrol{% endblock %}
+{% block content %}
+<p><a href="/runs/{{ page.run_id }}">← Run #{{ page.run_id }}</a></p>
+<h1>Page detail</h1>
+<p><code>{{ page.url }}</code></p>
+<div class="cards">
+  <div class="card"><span>Status</span><b>{{ page.status_code if page.status_code is not none else "—" }}</b></div>
+  <div class="card"><span>Depth</span><b>{{ page.depth }}</b></div>
+  <div class="card"><span>Duration</span><b>{{ page.duration_ms }} ms</b></div>
+</div>
+<p class="muted">SHA-256 <code>{{ page.content_hash }}</code>
+  {% if page.error %} · <span class="bad">{{ page.error }}</span>{% endif %}</p>
+
+<h2>Outgoing links</h2>
+{% if links %}
+<table>
+  <thead><tr><th>Target</th><th>Raw href</th><th>Kind</th><th>Scope</th>
+    <th>Line</th><th>Check</th><th>Redirects</th></tr></thead>
+  <tbody>
+  {% for link in links %}
+    <tr>
+      <td><code>{{ link.target_url }}</code>{% if link.anchor %}<br><span class="muted">#{{ link.anchor }}</span>{% endif %}</td>
+      <td><code>{{ link.raw_href }}</code></td>
+      <td>{{ link.kind }}</td>
+      <td>{{ link.scope }}</td>
+      <td>{{ link.line_no }}</td>
+      <td>
+        {% if link.check %}
+          {{ link.check.status_code if link.check.status_code is not none else "—" }}
+          {% if link.check.ok %}<span class="ok">ok</span>
+          {% else %}<span class="bad">broken</span>{% endif %}
+          {% if link.check.error %}<br><span class="muted">{{ link.check.error }}</span>{% endif %}
+        {% else %}<span class="muted">not checked</span>{% endif %}
+      </td>
+      <td>{{ link.check.get("redirect_chain", [])|length if link.check else 0 }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">This page has no outgoing links.</div>
+{% endif %}
+{% endblock %}

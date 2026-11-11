@@ -1,0 +1,9 @@
+# One absolute URL per line. Used by:
+#   python -m linkpatrol scan --config examples/scan.demo.toml \
+#     --urls-file examples/urls.example.txt
+# Blank lines and lines starting with # are ignored.
+http://127.0.0.1:5001/
+http://127.0.0.1:5001/about
+http://127.0.0.1:5001/docs
+http://127.0.0.1:5001/blog/post-1
+http://127.0.0.1:5001/orphan

@@ -1,0 +1,8 @@
+# Broken-link findings matching any rule are omitted from new_broken.
+# status is optional; when present it must match the observed HTTP status.
+[[ignore]]
+url_regex = "/legacy/"
+status = [404, 410]
+
+[[ignore]]
+url_regex = "^http://127\\.0\\.0\\.1:5001/private/"

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "linkpatrol" }}</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#66788a; --line:#d6dde5;
+      --accent:#0b63ce; --bad:#b42318; --warn:#9a6700; --good:#176b3a; --bg:#f7f9fc; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+    header { background:#fff; border-bottom:1px solid var(--line); }
+    .wrap { max-width:1120px; margin:0 auto; padding:0 1.25rem; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; height:58px; }
+    .brand { font-weight:700; font-size:1.1rem; color:var(--ink); text-decoration:none; }
+    nav a { color:var(--accent); text-decoration:none; margin-left:1rem; }
+    main.wrap { padding-top:1.5rem; padding-bottom:3rem; }
+    h1 { font-size:1.55rem; margin:.2rem 0 1rem; }
+    h2 { font-size:1.18rem; margin:2rem 0 .75rem; }
+    h3 { font-size:1rem; margin:1.25rem 0 .4rem; }
+    a { color:var(--accent); }
+    .muted { color:var(--muted); }
+    .cards { display:flex; flex-wrap:wrap; gap:.75rem; margin-bottom:1.25rem; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:8px;
+      padding:.75rem 1rem; min-width:130px; }
+    .card b { display:block; font-size:1.35rem; }
+    .card span { color:var(--muted); font-size:.82rem; }
+    table { width:100%; border-collapse:collapse; background:#fff;
+      border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    th, td { padding:.55rem .65rem; border-bottom:1px solid var(--line);
+      text-align:left; vertical-align:top; font-size:.9rem; }
+    th { background:#eef2f7; font-size:.78rem; text-transform:uppercase;
+      letter-spacing:.03em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    code { font-size:.84em; overflow-wrap:anywhere; }
+    .bad { color:var(--bad); font-weight:600; }
+    .warn { color:var(--warn); font-weight:600; }
+    .ok { color:var(--good); font-weight:600; }
+    .filters { display:flex; flex-wrap:wrap; gap:.6rem; align-items:end;
+      background:#fff; border:1px solid var(--line); padding:.8rem; margin-bottom:1rem; }
+    .filters label { font-size:.8rem; color:var(--muted); display:block; }
+    input, select, button { font:inherit; padding:.38rem .5rem; border:1px solid var(--line);
+      border-radius:5px; background:#fff; }
+    button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+    .empty { background:#fff; border:1px dashed var(--line); padding:1.2rem;
+      color:var(--muted); border-radius:8px; }
+    footer { color:var(--muted); font-size:.82rem; margin-top:2.5rem; }
+    .pill { display:inline-block; border-radius:999px; padding:.05rem .5rem;
+      border:1px solid var(--line); font-size:.76rem; }
+  </style>
+</head>
+<body>
+<header><div class="wrap topbar">
+  <a class="brand" href="/">linkpatrol</a>
+  <nav>{% block nav %}<a href="/">Runs</a>{% endblock %}</nav>
+</div></header>
+<main class="wrap">
+  {% block content %}{% if body %}{{ body|safe }}{% endif %}{% endblock %}
+  <footer>Local-only link health reports. No external assets are loaded.</footer>
+</main>
+</body>
+</html>
