@@ -22,12 +22,28 @@ def build_report(store: Store, run_id: int) -> dict:
     checks = store.get_checks_map(run_id)
     broken: list[dict] = []
     anchors: list[dict] = []
+    circuit_skips: list[dict] = []
     sources_with_internal: set[str] = set()
     for link in links:
         if link["scope"] == "internal":
             sources_with_internal.add(link["source_url"])
         check = checks.get(link["target_url"])
         if check is None:
+            continue
+        if check["skipped"]:
+            detail = check["skip_detail"]
+            circuit_skips.append(
+                {
+                    "source_url": link["source_url"],
+                    "target_url": link["target_url"],
+                    "raw_href": link["raw_href"],
+                    "kind": link["kind"],
+                    "scope": link["scope"],
+                    "line_no": link["line_no"],
+                    "host": detail.get("host", ""),
+                    "failures": detail.get("failures", 0),
+                }
+            )
             continue
         if not check["ok"]:
             broken.append(
@@ -68,6 +84,7 @@ def build_report(store: Store, run_id: int) -> dict:
     redirects.sort(key=lambda item: item["url"])
     broken.sort(key=lambda item: (item["source_url"], item["target_url"]))
     anchors.sort(key=lambda item: (item["source_url"], item["target_url"]))
+    circuit_skips.sort(key=lambda item: (item["host"], item["source_url"], item["target_url"]))
     findings = run["stats"].get("findings", {})
     reachable = [p for p in pages if p["status_code"] and 200 <= p["status_code"] < 300]
     dead_ends = findings.get("dead_end")
@@ -111,6 +128,22 @@ def build_report(store: Store, run_id: int) -> dict:
         "orphans": orphan_report,
         "dead_ends": dead_ends,
     }
+    if circuit_skips:
+        # Only present when the circuit breaker actually tripped, so reports
+        # of runs without circuit activity stay field-identical.
+        hosts: dict[str, dict] = {}
+        for item in circuit_skips:
+            entry = hosts.setdefault(
+                item["host"],
+                {"host": item["host"], "skipped": 0, "max_failures": 0},
+            )
+            entry["skipped"] += 1
+            entry["max_failures"] = max(entry["max_failures"], item["failures"])
+        data["summary"]["circuit_skips"] = len(circuit_skips)
+        data["circuit"] = {
+            "skips": circuit_skips,
+            "hosts": sorted(hosts.values(), key=lambda entry: entry["host"]),
+        }
     return data
 
 def write_json_report(data: dict, output_dir: str | Path) -> Path:

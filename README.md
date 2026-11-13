@@ -32,7 +32,9 @@ SQLite，生成 JSON/HTML 报告与 sitemap.xml，并支持把“新增断链”
                      |                        +--> extractor.py (links/anchors)
                      v
                checker.py (reuse crawl, HEAD->GET, redirects, anchors)
-                     |
+                     |        ^
+                     |        +--> breaker.py (per-host failure circuit,
+                     |                     shared via fetcher)
                      v
                   store.py (SQLite, WAL, unique constraints)
                     / \
@@ -57,7 +59,7 @@ SQLite 开启外键与 WAL。写入按行使用 savepoint；单条失败回滚�
 | `runs` | `id, seed, config_json, started_at, finished_at, status, stats_json` | 主键 `id` |
 | `pages` | `id, run_id, url, depth, status_code, content_hash, duration_ms, error` | `(run_id, url)` |
 | `links` | `id, run_id, source_url, target_url, raw_href, kind, scope, line_no, anchor` | `(run_id, source_url, target_url, kind)` |
-| `checks` | `id, run_id, url, final_url, status_code, redirect_chain_json, anchor_ok, ok, error, checked_at` | `(run_id, url)` |
+| `checks` | `id, run_id, url, final_url, status_code, redirect_chain_json, anchor_ok, ok, error, checked_at, skipped, skip_detail_json` | `(run_id, url)` |
 | `baselines` | `name, run_id, created_at` | 主键 `name` |
 
 `pages` 记录规范化 URL、深度、状态、响应体 SHA-256、耗时与错误；`links` 保留下
@@ -84,6 +86,11 @@ TOML 配置在默认值基础上合并，未知键、类型错误或非法正则
 | `robots` | `respect` | `true` | 是否遵守 robots.txt |
 | `robots` | `user_agent` | `linkpatrol/0.1` | 请求 UA 与 robots 组匹配 |
 | `external` | `check` | `true` | 是否检查站外链接 |
+| `circuit` | `enabled` | `false` | 是否开启按 host 的外链失败熔断 |
+| `circuit` | `threshold` | `5` | 窗口内连续失败达到该次数即熔断 |
+| `circuit` | `window_s` | `300.0` | 失败计数的滑动窗口秒数 |
+| `circuit` | `count_only_server_errors` | `true` | 只把网络错误/5xx 计入；`false` 时 4xx 也计入 |
+| `circuit` | `probe_allowance` | `0` | 熔断后仍放行的探测请求数 |
 | `normalize` | `drop_params` | `[]` | 通配符参数列表，如 `utm_*` |
 | `output` | `dir` | `reports` | JSON/HTML 报告目录 |
 | `output` | `database` | `out/linkpatrol.db` | SQLite 路径 |
@@ -116,6 +123,13 @@ user_agent = "linkpatrol-demo/0.1"
 
 [external]
 check = true
+
+[circuit]
+enabled = false
+threshold = 5
+window_s = 300.0
+count_only_server_errors = true
+probe_allowance = 0
 
 [normalize]
 drop_params = ["utm_*", "fbclid"]
@@ -188,10 +202,25 @@ python -m pytest
 | `ok` | 最终响应 2xx；若链接带 fragment，目标页锚点集合中存在该锚点 |
 | `broken` | 最终 4xx/5xx、网络错误、重定向循环、超过最大跳数、锚点缺失 |
 | `warning` | 最终 2xx，但记录了 ≥3 跳重定向链 |
+| `skipped` | 目标 host 已熔断：未发真实请求，`error = circuit_open` |
 
 站内 2xx HTML 页面链接直接复用爬取结果，不重复请求；站内资源与站外链接先 HEAD，
 返回 405/501 时回退 GET。目标为已抓取 2xx HTML 页时才校验 fragment。报告仅统计，
 不做 AI 原因推断或自动修复建议。
+
+## 按 host 的外链熔断
+
+开启 `[circuit]` 后，fetcher 会把每次**重试收敛后**的请求结果按 host 记入共享的
+熔断器（crawler 并发 worker 与 checker 共用同一实例，按 host 加锁，不构成全局
+瓶颈；robots 判定仍发生在抓取与熔断记录之前）。同一 host 在 `window_s` 窗口内
+连续失败达到 `threshold` 后，本轮后续指向该 host 的**站外链接**不再真实请求，
+checker 直接写入 `skipped` 检查行：`status_code` 为空、`error = circuit_open`，
+`skip_detail_json` 记录触发的 host 与当时该 host 的连续失败数。熔断后仍可用
+`probe_allowance` 放行少量探测请求，探测成功即重置该 host 的计数。
+
+熔断只观察、不改变 fetcher 的重试语义（4xx 依然不重试）；crawler 的站内抓取也
+不被拦截。跳过行不算断链：不进入 baseline diff，报告里按 host 单独分组展示，
+与真实网络错误视觉区分。`enabled = false`（默认）时整条链路无任何行为变化。
 
 ## 测试
 

@@ -32,6 +32,13 @@ DEFAULTS: dict[str, Any] = {
         "user_agent": "linkpatrol/0.1",
     },
     "external": {"check": True},
+    "circuit": {
+        "enabled": False,
+        "threshold": 5,
+        "window_s": 300.0,
+        "count_only_server_errors": True,
+        "probe_allowance": 0,
+    },
     "normalize": {"drop_params": []},
     "output": {
         "dir": "reports",
@@ -115,6 +122,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(config["external"]["check"], bool):
         raise ConfigError("external.check must be a boolean")
+
+    circuit = config["circuit"]
+    if not isinstance(circuit["enabled"], bool):
+        raise ConfigError("circuit.enabled must be a boolean")
+    _as_int(circuit, "threshold", 1, 1000)
+    _as_float(circuit, "window_s", 0.1, 86400.0)
+    if not isinstance(circuit["count_only_server_errors"], bool):
+        raise ConfigError("circuit.count_only_server_errors must be a boolean")
+    _as_int(circuit, "probe_allowance", 0, 100)
 
     drop_params = config["normalize"]["drop_params"]
     if not isinstance(drop_params, list) or not all(isinstance(x, str) for x in drop_params):

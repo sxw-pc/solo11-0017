@@ -23,6 +23,15 @@ user_agent = "linkpatrol-demo/0.1"
 [external]
 check = true
 
+# Per-host failure circuit breaker for external links. Disabled by default;
+# enable to stop re-requesting a host that keeps failing within one run.
+[circuit]
+enabled = false
+threshold = 5
+window_s = 300.0
+count_only_server_errors = true
+probe_allowance = 0
+
 [normalize]
 drop_params = ["utm_*", "fbclid"]
 

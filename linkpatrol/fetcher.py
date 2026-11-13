@@ -9,6 +9,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
+from .breaker import CircuitBreaker
+from .urlnorm import host_key
+
 REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -71,6 +74,7 @@ class Fetcher:
         max_redirects: int = 5,
         max_body_bytes: int = 2 * 1024 * 1024,
         backoff_s: float = 0.02,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self.timeout_s = timeout_s
         self.retries = max(0, retries)
@@ -78,6 +82,7 @@ class Fetcher:
         self.max_redirects = max(1, max_redirects)
         self.max_body_bytes = max_body_bytes
         self.backoff_s = backoff_s
+        self.breaker = breaker if breaker is not None else CircuitBreaker()
         self.request_count = 0
 
     def fetch(
@@ -91,8 +96,20 @@ class Fetcher:
         Network failures and 5xx responses are retried with exponential
         backoff. 4xx responses are never retried. Redirect loops terminate
         with ``error == "redirect_loop"``.
+
+        The settled outcome (after retries and redirect following) is
+        reported to the circuit breaker exactly once, against the host that
+        produced the final response. The breaker only observes here; it
+        never alters fetch behaviour.
         """
         limit = self.max_body_bytes if max_body_bytes is None else max_body_bytes
+        result = self._fetch_followed(url, method, limit)
+        self.breaker.record_result(
+            host_key(result.final_url or url), result.status_code, result.error
+        )
+        return result
+
+    def _fetch_followed(self, url: str, method: str, limit: int) -> FetchResult:
         started = time.perf_counter()
         current = url
         seen = {current}

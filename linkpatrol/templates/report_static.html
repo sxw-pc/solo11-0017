@@ -13,6 +13,9 @@
   <div class="card"><span>Anchor failures</span><b>{{ summary.anchor_failures }}</b></div>
   <div class="card"><span>Orphans</span><b>{{ summary.orphan }}</b></div>
   <div class="card"><span>Dead ends</span><b>{{ summary.dead_ends }}</b></div>
+  {% if summary.circuit_skips is defined %}
+  <div class="card"><span>Circuit skips</span><b class="{{ 'warn' if summary.circuit_skips else 'ok' }}">{{ summary.circuit_skips }}</b></div>
+  {% endif %}
 </div>
 
 <h2>Broken links</h2>
@@ -36,6 +39,30 @@
 {% endfor %}
 {% else %}
 <div class="empty">No broken links were found.</div>
+{% endif %}
+
+{% if circuit is defined %}
+<h2>Circuit-breaker skips</h2>
+<p class="muted">The hosts below reached their failure threshold, so remaining external
+links to them were recorded as skipped without a real request. These are not counted
+as broken and do not enter baseline diffs.</p>
+{% for host in circuit.hosts %}
+  <h3><code>{{ host.host }}</code> · {{ host.skipped }} skipped · failure count at trip: {{ host.max_failures }}</h3>
+  <table>
+    <thead><tr><th>Source</th><th>Target</th><th>Result</th><th>Host failures</th><th>Line</th></tr></thead>
+    <tbody>
+    {% for item in circuit.skips if item.host == host.host %}
+      <tr>
+        <td><code>{{ item.source_url }}</code></td>
+        <td><code>{{ item.target_url }}</code></td>
+        <td><span class="pill warn">skipped · circuit_open</span></td>
+        <td>{{ item.failures }}</td>
+        <td>{{ item.line_no }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endfor %}
 {% endif %}
 
 <h2>Redirects</h2>

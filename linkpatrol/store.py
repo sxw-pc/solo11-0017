@@ -29,8 +29,24 @@ class Store:
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
         self.write_errors: list[str] = []
+
+    def _migrate(self) -> None:
+        """Add newer columns to databases created by older versions."""
+        columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(checks)")
+        }
+        if "skipped" not in columns:
+            self.conn.execute(
+                "ALTER TABLE checks ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0"
+            )
+        if "skip_detail_json" not in columns:
+            self.conn.execute(
+                "ALTER TABLE checks ADD COLUMN skip_detail_json "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -136,8 +152,8 @@ class Store:
         chain = values.get("redirect_chain", [])
         return self._write(
             "INSERT INTO checks(run_id, url, final_url, status_code, "
-            "redirect_chain_json, anchor_ok, ok, error, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "redirect_chain_json, anchor_ok, ok, error, checked_at, "
+            "skipped, skip_detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 values["url"],
@@ -148,6 +164,8 @@ class Store:
                 int(bool(values.get("ok", False))),
                 values.get("error"),
                 values["checked_at"],
+                int(bool(values.get("skipped", False))),
+                json.dumps(values.get("skip_detail") or {}, sort_keys=True),
             ),
         )
 
@@ -227,6 +245,8 @@ class Store:
         data["redirect_chain"] = json.loads(data.pop("redirect_chain_json") or "[]")
         data["anchor_ok"] = bool(data["anchor_ok"])
         data["ok"] = bool(data["ok"])
+        data["skipped"] = bool(data["skipped"])
+        data["skip_detail"] = json.loads(data.pop("skip_detail_json") or "{}")
         return data
 
     def broken_identities(self, run_id: int) -> list[dict]:
@@ -234,7 +254,7 @@ class Store:
             "SELECT DISTINCT l.source_url, l.target_url, c.status_code, c.error, "
             "c.anchor_ok FROM links l JOIN checks c "
             "ON c.run_id = l.run_id AND c.url = l.target_url "
-            "WHERE l.run_id = ? AND c.ok = 0 "
+            "WHERE l.run_id = ? AND c.ok = 0 AND c.skipped = 0 "
             "ORDER BY l.source_url, l.target_url",
             (run_id,),
         ).fetchall()

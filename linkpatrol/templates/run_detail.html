@@ -69,7 +69,8 @@
       <td>{{ link.check.get("status_code", "—") }}</td>
       <td>
         {% if link.check %}
-          {% if link.check.ok %}<span class="ok">ok</span>
+          {% if link.check.skipped %}<span class="warn">skipped</span>
+          {% elif link.check.ok %}<span class="ok">ok</span>
           {% else %}<span class="bad">broken</span>{% endif %}
           {% if link.check.error %}<span class="muted"> · {{ link.check.error }}</span>{% endif %}
         {% else %}<span class="muted">not checked</span>{% endif %}

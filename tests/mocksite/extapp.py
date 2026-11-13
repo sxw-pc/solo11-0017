@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from flask import Flask, Response, abort, request
 
 from . import pages
 
 def create_ext_app() -> Flask:
     app = Flask(__name__)
+    counters: dict[str, int] = defaultdict(int)
+    app.config["COUNTERS"] = counters
 
     @app.get("/ok")
     def ok():
@@ -22,6 +26,12 @@ def create_ext_app() -> Flask:
         if request.method == "HEAD":
             return Response("", status=405)
         return Response(pages.EXT_HEAD_ONLY, content_type="text/html; charset=utf-8")
+
+    @app.route("/fail/<int:index>", methods=["GET", "HEAD"])
+    def fail(index):
+        # Persistently failing endpoint used by circuit-breaker tests.
+        counters["fail"] += 1
+        return Response(pages.EXT_FAIL, status=500, content_type="text/html")
 
     @app.errorhandler(404)
     def not_found(_error):

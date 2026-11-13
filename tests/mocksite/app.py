@@ -16,6 +16,7 @@ def create_mock_app(ext_base: str = "http://127.0.0.1:9",
     app.config["COUNTERS"] = counters
     app.config["UNSTABLE_FAILURES"] = unstable_failures
     app.config["REGRESSION_BROKEN"] = False
+    app.config["EXT_FARM_LINKS"] = 12
 
     def html(body: str, status: int = 200, title: str = "Mock"):
         return Response(body, status=status, content_type="text/html; charset=utf-8")
@@ -115,6 +116,18 @@ def create_mock_app(ext_base: str = "http://127.0.0.1:9",
     @app.get("/non-html")
     def non_html():
         return Response(pages.NON_HTML, content_type="application/pdf")
+
+    @app.get("/ext-farm")
+    def ext_farm():
+        # Batch of links to one persistently failing external host. Not
+        # linked from any other page, so existing crawls never see it.
+        external = ext_base.rstrip("/")
+        total = app.config["EXT_FARM_LINKS"]
+        links = "\n".join(
+            f'<a href="{external}/fail/{index}">failing link {index}</a>'
+            for index in range(total)
+        )
+        return html(pages.EXT_FARM.format(links=links))
 
     @app.get("/private/secret")
     def private():

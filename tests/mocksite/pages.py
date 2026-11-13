@@ -133,3 +133,16 @@ EXT_NOT_FOUND = """<!doctype html>
 <html><head><title>External missing</title></head><body>
 <h1>External missing</h1>
 </body></html>"""
+
+EXT_FARM = """<!doctype html>
+<html><head><title>External farm</title></head><body>
+<h1>External farm</h1>
+<p>
+{links}
+</p>
+</body></html>"""
+
+EXT_FAIL = """<!doctype html>
+<html><head><title>External failure</title></head><body>
+<h1>External failure</h1>
+</body></html>"""

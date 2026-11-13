@@ -59,7 +59,9 @@ def create_app(db_path: str | Path) -> Flask:
             row["check"] = check
             rows.append(row)
         all_checks = list(checks.values())
-        broken_count = sum(1 for check in all_checks if not check["ok"])
+        broken_count = sum(
+            1 for check in all_checks if not check["ok"] and not check["skipped"]
+        )
         return render_template(
             "run_detail.html",
             run=run,

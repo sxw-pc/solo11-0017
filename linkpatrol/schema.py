@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS checks (
     ok INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     checked_at TEXT NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    skip_detail_json TEXT NOT NULL DEFAULT '{}',
     UNIQUE(run_id, url)
 );
 CREATE TABLE IF NOT EXISTS baselines (

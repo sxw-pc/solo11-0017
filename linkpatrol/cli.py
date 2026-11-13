@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .baseline import BaselineError, IgnoreRules, diff_runs, exit_code_for, summary_text
+from .breaker import breaker_from_config
 from .checker import check_links
 from .config import ConfigError, load_config
 from .crawler import crawl_site
@@ -109,6 +110,7 @@ def _scan(args) -> int:
         retries=limits["retries"],
         user_agent=config["robots"]["user_agent"],
         max_redirects=limits["max_redirects"],
+        breaker=breaker_from_config(config),
     )
     try:
         crawl = crawl_site(config, fetcher=fetcher)
@@ -141,6 +143,10 @@ def _scan(args) -> int:
                 "sitemap_urls": len(entries),
             }
         )
+        if checks.circuit_skipped:
+            # Recorded only when the breaker tripped, keeping the stats of
+            # runs without circuit activity field-identical.
+            stats["circuit_skips"] = len(checks.circuit_skipped)
         store.finish_run(run_id, "completed", stats)
         json_path, html_path = write_reports(store, run_id, config["output"]["dir"])
         print(

@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
+from .breaker import CIRCUIT_OPEN_ERROR, CircuitBreaker, GateDecision, breaker_from_config
 from .crawler import CrawlResult, PageRecord
 from .extractor import ExtractedLink, extract_links
 from .fetcher import FetchResult, Fetcher
-from .urlnorm import is_internal, normalize_url, strip_fragment
+from .urlnorm import host_key, is_internal, normalize_url, strip_fragment
 
 @dataclass
 class CheckRecord:
@@ -26,9 +27,13 @@ class CheckRecord:
     kind: str = "page"
     scope: str = "internal"
     warning: bool = False
+    skipped: bool = False
+    skip_detail: dict = field(default_factory=dict)
 
     @property
     def verdict(self) -> str:
+        if self.skipped:
+            return "skipped"
         if self.ok and self.warning:
             return "warning"
         return "ok" if self.ok else "broken"
@@ -43,7 +48,14 @@ class CheckReport:
 
     @property
     def broken(self) -> list[CheckRecord]:
-        return [record for record in self.checks.values() if not record.ok]
+        return [
+            record for record in self.checks.values()
+            if not record.ok and not record.skipped
+        ]
+
+    @property
+    def circuit_skipped(self) -> list[CheckRecord]:
+        return [record for record in self.checks.values() if record.skipped]
 
     @property
     def warnings(self) -> list[CheckRecord]:
@@ -87,19 +99,28 @@ class _Probe:
 class Checker:
     """Check unique links while reusing crawled in-scope pages."""
 
-    def __init__(self, config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None) -> None:
+    def __init__(self, config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None,
+                 breaker: CircuitBreaker | None = None) -> None:
         self.config = config
         self.crawl = crawl
         limits = config["limits"]
         self.seed = config["seed"]
         self.allow_subdomains = config["scope"]["allow_subdomains"]
         self.check_external = config["external"]["check"]
-        self.fetcher = fetcher or Fetcher(
-            timeout_s=limits["timeout_s"],
-            retries=limits["retries"],
-            user_agent=config["robots"]["user_agent"],
-            max_redirects=limits["max_redirects"],
-        )
+        if fetcher is None:
+            self.breaker = breaker if breaker is not None else breaker_from_config(config)
+            self.fetcher = Fetcher(
+                timeout_s=limits["timeout_s"],
+                retries=limits["retries"],
+                user_agent=config["robots"]["user_agent"],
+                max_redirects=limits["max_redirects"],
+                breaker=self.breaker,
+            )
+        else:
+            # The breaker must be the one the fetcher records into, otherwise
+            # skip decisions would be made from an empty state.
+            self.fetcher = fetcher
+            self.breaker = breaker if breaker is not None else fetcher.breaker
         self._base_cache: dict[str, _Probe] = {}
 
     def run(self) -> CheckReport:
@@ -126,6 +147,10 @@ class Checker:
     def _check_link(self, link: ExtractedLink) -> CheckRecord:
         base = strip_fragment(link.target_url)
         internal = is_internal(base, self.seed, self.allow_subdomains)
+        if not internal and base not in self._base_cache:
+            decision = self.breaker.decide(host_key(base))
+            if not decision.allowed:
+                return self._circuit_skip(link, base, decision)
         probe = self._probe(base, need_anchors=bool(link.anchor))
         anchor_ok = True
         error = probe.error
@@ -150,6 +175,28 @@ class Checker:
             kind=link.kind,
             scope=link.scope,
             warning=warning,
+        )
+
+    def _circuit_skip(self, link: ExtractedLink, base: str,
+                      decision: GateDecision) -> CheckRecord:
+        """Record a circuit-broken external link without any real request."""
+        return CheckRecord(
+            url=link.target_url,
+            final_url=base,
+            status_code=None,
+            redirect_chain=[],
+            anchor_ok=True,
+            ok=False,
+            error=CIRCUIT_OPEN_ERROR,
+            checked_at=_now(),
+            kind=link.kind,
+            scope=link.scope,
+            skipped=True,
+            skip_detail={
+                "reason": CIRCUIT_OPEN_ERROR,
+                "host": host_key(base),
+                "failures": decision.failures,
+            },
         )
 
     def _probe(self, base: str, need_anchors: bool = False) -> _Probe:
@@ -205,6 +252,7 @@ class Checker:
             ).anchors
         return unquote(fragment) in probe.anchors
 
-def check_links(config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None) -> CheckReport:
+def check_links(config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None,
+                breaker: CircuitBreaker | None = None) -> CheckReport:
     """Convenience wrapper used by the CLI and tests."""
-    return Checker(config, crawl, fetcher=fetcher).run()
+    return Checker(config, crawl, fetcher=fetcher, breaker=breaker).run()
