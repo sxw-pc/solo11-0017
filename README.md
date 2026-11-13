@@ -42,6 +42,14 @@ SQLite，生成 JSON/HTML 报告与 sitemap.xml，并支持把“新增断链”
        |       |
        v       v
  sitemap.py  server.py (read-only Flask UI)
+
+ batch.toml ([[sites]] -> 各自 scan.toml)
+    |
+    v
+ batch.py (manifest, 去重/隔离, 全局信号量 BoundedFetcher, 每站独立 delay/并发)
+    |        复用 config/crawler/checker/store/report 的同一条单站管线
+    v
+ store.py: batch_runs + batch_sites, runs.batch_id/site_name
 ```
 
 设计取舍：抓取、HTML 解析、配置、存储与 CLI **刻意只使用标准库**；Flask 仅用于
@@ -54,11 +62,13 @@ SQLite 开启外键与 WAL。写入按行使用 savepoint；单条失败回滚�
 
 | 表 | 字段 | 唯一约束 |
 | --- | --- | --- |
-| `runs` | `id, seed, config_json, started_at, finished_at, status, stats_json` | 主键 `id` |
+| `runs` | `id, seed, config_json, started_at, finished_at, status, stats_json, batch_id, site_name` | 主键 `id` |
 | `pages` | `id, run_id, url, depth, status_code, content_hash, duration_ms, error` | `(run_id, url)` |
 | `links` | `id, run_id, source_url, target_url, raw_href, kind, scope, line_no, anchor` | `(run_id, source_url, target_url, kind)` |
 | `checks` | `id, run_id, url, final_url, status_code, redirect_chain_json, anchor_ok, ok, error, checked_at` | `(run_id, url)` |
 | `baselines` | `name, run_id, created_at` | 主键 `name` |
+| `batch_runs` | `id, manifest_path, started_at, finished_at, status, max_concurrency, stats_json` | 主键 `id` |
+| `batch_sites` | `id, batch_id, name, config_path, host, status, run_id, error, detail_json, started_at, finished_at` | `(batch_id, name)` |
 
 `pages` 记录规范化 URL、深度、状态、响应体 SHA-256、耗时与错误；`links` 保留下
 载目标、原文、类型 (`page/asset/form`)、范围 (`internal/external/anchor/mailto/tel/other`)
@@ -146,14 +156,75 @@ python -m linkpatrol diff --baseline prod --run 2 --db out/linkpatrol.db \
 seed 源站的 `/sitemap.xml`。`serve` 提供 `/`、`/runs/<id>`（按状态/类型过滤）和
 `/pages/<id>`，全部服务端渲染，CSS 内联，不加载任何外部 JS/CSS/字体。
 
+### 批量巡检 `batch-scan`
+
+真实巡检通常要一次跑完一批站点。`batch-scan` 读取一份**批量清单**（TOML），其中
+每个 `[[sites]]` 条目指向一份普通的单站 `scan.toml`——站点配置的合并、默认值与
+校验与 `scan` 完全复用，不另造一套格式。
+
+```toml
+[batch]
+max_concurrency = 4          # 全局在途 HTTP 请求硬上限
+database = "out/linkpatrol.db"   # 所有站点共用的 SQLite
+reports_dir = "reports/batch"    # 报告落到 reports_dir/<站点名>/
+sitemap_dir = "out/sitemaps"     # 每个站点写 <站点名>.xml
+
+[[sites]]
+name = "demo"
+config = "site-demo.toml"        # 相对清单文件所在目录解析
+
+[[sites]]
+name = "demo-duplicate"          # 与 demo 同 host：合并，不重复爬
+config = "site-demo-duplicate.toml"
+```
+
+```bash
+python -m linkpatrol batch-scan --manifest examples/batch.example.toml
+python -m linkpatrol batch-scan --manifest batch.toml --max-concurrency 2  # 命令行覆盖
+```
+
+调度与隔离语义：
+
+- **两级并发**。每个站点保留自己 `scan.toml` 里的 `limits.concurrency` 线程池与
+  `limits.delay_ms` 节流锁，站点之间互不影响；另有一个全局信号量
+  （`max_concurrency`）包住每一个 HTTP 请求（爬取、链接检查、robots、sitemap 探测
+  都经过它），因此**全进程同时在途请求数永远不超过全局上限**，既保护本机也保护
+  对端。某站点等待自己的 `delay_ms` 时不占用全局许可。
+- **失败隔离**。单个站点配置非法、整站不可达（所有请求失败）或扫描抛异常，只把该
+  站点记为 `invalid`/`failed` 并继续跑其余站点，绝不拖垮整批。
+- **同 host 合并**。清单里多条目解析到同一 host（hostname 加非默认端口，scheme 与
+  path 不参与）时只爬第一条，其余记为 `skipped` 并标注合并来源，不会重复抓取。
+- **站点级状态落库**。每批写一行 `batch_runs`，每站点写一行 `batch_sites`
+  （`completed`/`failed`/`skipped`/`invalid`，含 `run_id` 与错误信息）；每个实际
+  爬取的站点仍在 `runs` 表产生一条普通 run，并通过 `runs.batch_id`/`runs.site_name`
+  反向归属到批次。结束时打印每站成功/失败/跳过/非法的汇总以及全局并发峰值。
+
+批量模式的退出码：
+
+| 码 | 含义 |
+| --- | --- |
+| `0` | 所有实际爬取的站点都完成（跳过的重复 host 不算失败） |
+| `1` | 没有任何站点成功（全部失败） |
+| `3` | 批量清单本身非法（文件缺失、TOML 错误、未知键、无站点等） |
+| `4` | 部分失败：至少一站完成且至少一站失败或配置非法 |
+
+**兼容性**：`runs` 表新增的 `batch_id`/`site_name` 为可空列，`batch_runs`/
+`batch_sites` 是全新表；对旧数据库采用 `ALTER TABLE ... ADD COLUMN` 幂等迁移，旧
+run 两列为 `NULL`，旧版本单站 `scan` 的写入与读取路径不变。批次产生的 run 与单站
+run 结构完全一致，因此 `report`、`baseline`、`diff`、`serve` 无需改动即可按
+`run_id` 正常读取。robots 策略与 URL 规范化逻辑未做任何修改，批量仅在外层包了一层
+全局并发限制。
+
+
 退出码：
 
 | 码 | 含义 |
 | --- | --- |
 | `0` | 成功；diff 未发现新增断链 |
-| `1` | 运行期错误（文件、数据库、抓取流程等） |
+| `1` | 运行期错误（文件、数据库、抓取流程等）；`batch-scan` 中表示全部站点失败 |
 | `2` | `--fail-on new-broken` 且存在新增断链 |
 | `3` | 配置错误 |
+| `4` | `batch-scan` 部分站点失败或配置非法（部分失败） |
 
 `diff` 的断链身份是 `(source_url, target_url)`，输出 `new_broken/fixed/persistent`
 三类 JSON，并把最近一次摘要写入当前 run 的 `stats_json.last_diff`。忽略规则只在

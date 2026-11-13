@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .schema import SCHEMA
+from .schema import BATCH_INDEXES, RUNS_ADDED_COLUMNS, SCHEMA
 
 class BaselineExistsError(ValueError):
     """Raised when setting an existing baseline without force."""
@@ -17,20 +18,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 class Store:
-    """A small repository around one SQLite database file."""
+    """A small repository around one SQLite database file.
 
-    def __init__(self, path: str | Path) -> None:
+    ``write_lock`` is an optional shared lock used when several per-site
+    stores point at the same SQLite file during a batch run. All mutating
+    statements take it, serialising cross-connection writes so WAL readers
+    never block and ``database is locked`` cannot appear under concurrency.
+    """
+
+    def __init__(self, path: str | Path, write_lock: threading.Lock | None = None) -> None:
         self.path = str(path)
+        self.write_lock = write_lock or threading.Lock()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate_columns()
         self.conn.commit()
         self.write_errors: list[str] = []
+
+    def _migrate_columns(self) -> None:
+        """Apply additive column/index migrations to pre-batch databases."""
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for table, column_ddl in RUNS_ADDED_COLUMNS:
+            column_name = column_ddl.split()[0]
+            if table == "runs" and column_name not in existing:
+                # ALTER TABLE only takes the column definition fragment.
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_ddl}")
+        for statement in BATCH_INDEXES:
+            self.conn.execute(statement)
 
     def close(self) -> None:
         self.conn.close()
@@ -44,27 +64,33 @@ class Store:
 
     def _write(self, sql: str, params: Iterable[Any]) -> bool:
         savepoint = "row_write"
-        self.conn.execute(f"SAVEPOINT {savepoint}")
-        try:
-            self.conn.execute(sql, tuple(params))
-            self.conn.execute(f"RELEASE {savepoint}")
-            self.conn.commit()
-            return True
-        except sqlite3.Error as exc:
-            self.conn.execute(f"ROLLBACK TO {savepoint}")
-            self.conn.execute(f"RELEASE {savepoint}")
-            self.conn.commit()
-            self.write_errors.append(str(exc))
-            return False
+        with self.write_lock:
+            self.conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                self.conn.execute(sql, tuple(params))
+                self.conn.execute(f"RELEASE {savepoint}")
+                self.conn.commit()
+                return True
+            except sqlite3.Error as exc:
+                self.conn.execute(f"ROLLBACK TO {savepoint}")
+                self.conn.execute(f"RELEASE {savepoint}")
+                self.conn.commit()
+                self.write_errors.append(str(exc))
+                return False
 
-    def create_run(self, seed: str, config: dict) -> int:
-        cursor = self.conn.execute(
-            "INSERT INTO runs(seed, config_json, started_at, status, stats_json) "
-            "VALUES (?, ?, ?, 'running', '{}')",
-            (seed, json.dumps(config, sort_keys=True), _now()),
-        )
-        self.conn.commit()
-        return int(cursor.lastrowid)
+    def create_run(self, seed: str, config: dict,
+                   batch_id: int | None = None,
+                   site_name: str | None = None) -> int:
+        with self.write_lock:
+            cursor = self.conn.execute(
+                "INSERT INTO runs(seed, config_json, started_at, status, "
+                "stats_json, batch_id, site_name) "
+                "VALUES (?, ?, ?, 'running', '{}', ?, ?)",
+                (seed, json.dumps(config, sort_keys=True), _now(),
+                 batch_id, site_name),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
 
     def finish_run(self, run_id: int, status: str = "completed",
                    stats: dict | None = None) -> None:
@@ -74,19 +100,21 @@ class Store:
             fields.append("stats_json = ?")
             params.append(json.dumps(stats, sort_keys=True))
         params.append(run_id)
-        self.conn.execute(f"UPDATE runs SET {', '.join(fields)} WHERE id = ?", params)
-        self.conn.commit()
+        with self.write_lock:
+            self.conn.execute(f"UPDATE runs SET {', '.join(fields)} WHERE id = ?", params)
+            self.conn.commit()
 
     def merge_stats(self, run_id: int, updates: dict) -> dict:
-        run = self.get_run(run_id)
-        stats = run["stats"] if run else {}
-        stats.update(updates)
-        self.conn.execute(
-            "UPDATE runs SET stats_json = ? WHERE id = ?",
-            (json.dumps(stats, sort_keys=True), run_id),
-        )
-        self.conn.commit()
-        return stats
+        with self.write_lock:
+            run = self.get_run(run_id)
+            stats = run["stats"] if run else {}
+            stats.update(updates)
+            self.conn.execute(
+                "UPDATE runs SET stats_json = ? WHERE id = ?",
+                (json.dumps(stats, sort_keys=True), run_id),
+            )
+            self.conn.commit()
+            return stats
 
     def insert_page(self, run_id: int, page: Any) -> bool:
         if isinstance(page, dict):
@@ -254,13 +282,14 @@ class Store:
             raise BaselineExistsError(f"baseline already exists: {name}")
         if self.get_run(run_id) is None:
             raise ValueError(f"run not found: {run_id}")
-        self.conn.execute(
-            "INSERT INTO baselines(name, run_id, created_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET run_id = excluded.run_id, "
-            "created_at = excluded.created_at",
-            (name, run_id, _now()),
-        )
-        self.conn.commit()
+        with self.write_lock:
+            self.conn.execute(
+                "INSERT INTO baselines(name, run_id, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET run_id = excluded.run_id, "
+                "created_at = excluded.created_at",
+                (name, run_id, _now()),
+            )
+            self.conn.commit()
 
     def get_baseline(self, name: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM baselines WHERE name = ?", (name,)).fetchone()
@@ -271,6 +300,104 @@ class Store:
         return [dict(row) for row in rows]
 
     def delete_baseline(self, name: str) -> bool:
-        cursor = self.conn.execute("DELETE FROM baselines WHERE name = ?", (name,))
-        self.conn.commit()
-        return cursor.rowcount > 0
+        with self.write_lock:
+            cursor = self.conn.execute("DELETE FROM baselines WHERE name = ?", (name,))
+            self.conn.commit()
+            return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Batch runs: one batch row plus one row per manifest site.
+    # ------------------------------------------------------------------
+
+    def create_batch(self, manifest_path: str, max_concurrency: int) -> int:
+        with self.write_lock:
+            cursor = self.conn.execute(
+                "INSERT INTO batch_runs(manifest_path, started_at, status, "
+                "max_concurrency, stats_json) VALUES (?, ?, 'running', ?, '{}')",
+                (manifest_path, _now(), max_concurrency),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
+
+    def add_batch_site(self, batch_id: int, name: str, config_path: str,
+                       host: str | None, status: str,
+                       run_id: int | None = None, error: str | None = None,
+                       detail: dict | None = None, started: bool = False) -> int:
+        with self.write_lock:
+            cursor = self.conn.execute(
+                "INSERT INTO batch_sites(batch_id, name, config_path, host, status, "
+                "run_id, error, detail_json, started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id, name, config_path, host, status, run_id, error,
+                    json.dumps(detail or {}, sort_keys=True),
+                    _now() if started else None,
+                    _now() if status in {"completed", "failed", "skipped"} else None,
+                ),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
+
+    def update_batch_site(self, batch_id: int, name: str, status: str,
+                          run_id: int | None = None, error: str | None = None,
+                          detail: dict | None = None) -> None:
+        fields = ["status = ?", "finished_at = ?"]
+        params: list[Any] = [status, _now()]
+        if run_id is not None:
+            fields.append("run_id = ?")
+            params.append(run_id)
+        if error is not None:
+            fields.append("error = ?")
+            params.append(error)
+        if detail is not None:
+            fields.append("detail_json = ?")
+            params.append(json.dumps(detail, sort_keys=True))
+        params.extend([batch_id, name])
+        with self.write_lock:
+            self.conn.execute(
+                f"UPDATE batch_sites SET {', '.join(fields)} "
+                "WHERE batch_id = ? AND name = ?",
+                params,
+            )
+            self.conn.commit()
+
+    def finish_batch(self, batch_id: int, status: str, stats: dict) -> None:
+        with self.write_lock:
+            self.conn.execute(
+                "UPDATE batch_runs SET status = ?, finished_at = ?, stats_json = ? "
+                "WHERE id = ?",
+                (status, _now(), json.dumps(stats, sort_keys=True), batch_id),
+            )
+            self.conn.commit()
+
+    def get_batch(self, batch_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM batch_runs WHERE id = ?", (batch_id,)
+        ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["stats"] = json.loads(data.pop("stats_json") or "{}")
+        return data
+
+    def get_batch_sites(self, batch_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM batch_sites WHERE batch_id = ? ORDER BY id", (batch_id,)
+        ).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["detail"] = json.loads(data.pop("detail_json") or "{}")
+            result.append(data)
+        return result
+
+    def list_batches(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM batch_runs ORDER BY id DESC"
+        ).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["stats"] = json.loads(data.pop("stats_json") or "{}")
+            result.append(data)
+        return result

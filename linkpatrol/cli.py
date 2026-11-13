@@ -8,11 +8,15 @@ import sys
 from pathlib import Path
 
 from .baseline import BaselineError, IgnoreRules, diff_runs, exit_code_for, summary_text
-from .checker import check_links
+from .batch import (
+    GlobalLimiter,
+    format_summary,
+    load_manifest,
+    run_batch,
+)
 from .config import ConfigError, load_config
-from .crawler import crawl_site
 from .fetcher import Fetcher
-from .orphans import compute_findings, load_url_list
+from .orphans import load_url_list
 from .report import write_reports
 from .sitemap import SitemapError, generate_sitemap, parse_sitemap, parse_sitemap_file
 from .store import BaselineExistsError, Store
@@ -29,6 +33,17 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument("--config", required=True)
     scan.add_argument("--urls-file", help="listed URLs for orphan comparison")
     scan.add_argument("--sitemap-url", help="remote sitemap used for orphan comparison")
+
+    batch_scan = sub.add_parser(
+        "batch-scan",
+        help="crawl every site listed in a batch manifest in one command",
+    )
+    batch_scan.add_argument("--manifest", required=True)
+    batch_scan.add_argument(
+        "--max-concurrency",
+        type=int,
+        help="override the manifest's global in-flight request limit",
+    )
 
     report = sub.add_parser("report", help="regenerate reports for a run")
     report.add_argument("--db", default="out/linkpatrol.db")
@@ -100,6 +115,8 @@ def _listed_urls(args, config: dict, fetcher: Fetcher) -> list[str] | None:
         return None
 
 def _scan(args) -> int:
+    from .batch import execute_scan
+
     config = load_config(args.config)
     limits = config["limits"]
     store = Store(config["output"]["database"])
@@ -111,41 +128,17 @@ def _scan(args) -> int:
         max_redirects=limits["max_redirects"],
     )
     try:
-        crawl = crawl_site(config, fetcher=fetcher)
-        store.save_crawl(run_id, crawl.pages.values())
-        store.save_links(run_id, crawl.iter_links())
-        checks = check_links(config, crawl, fetcher=fetcher)
-        store.save_checks(run_id, checks.checks.values())
-        entries = [
-            {"url": page.url, "lastmod": None}
-            for page in crawl.pages.values()
-            if page.is_ok and page.is_html
-        ]
-        generate_sitemap(entries, config["output"]["sitemap"])
-        listed = _listed_urls(args, config, fetcher)
-        if listed is None:
-            findings = compute_findings([], crawl.pages.values())
-            findings["orphan"] = []
-            findings["unlisted"] = []
-        else:
-            findings = compute_findings(listed, crawl.pages.values())
-        stats = crawl.stats.as_dict()
-        stats.update(
-            {
-                "crawl": crawl.stats.as_dict(),
-                "checks": len(checks.checks),
-                "broken": len(checks.broken),
-                "warnings": len(checks.warnings),
-                "findings": findings,
-                "write_errors": len(store.write_errors),
-                "sitemap_urls": len(entries),
-            }
+        summary = execute_scan(
+            config,
+            store,
+            fetcher,
+            run_id,
+            listed_urls_provider=lambda f: _listed_urls(args, config, f),
         )
-        store.finish_run(run_id, "completed", stats)
-        json_path, html_path = write_reports(store, run_id, config["output"]["dir"])
         print(
-            f"run {run_id}: pages={len(crawl.pages)} checks={len(checks.checks)} "
-            f"broken={len(checks.broken)} reports={json_path},{html_path}"
+            f"run {run_id}: pages={summary['pages']} checks={summary['checks']} "
+            f"broken={summary['broken']} reports={summary['json_report']},"
+            f"{summary['html_report']}"
         )
         return 0
     except Exception:
@@ -153,6 +146,57 @@ def _scan(args) -> int:
         raise
     finally:
         store.close()
+
+def _auto_sitemap_provider(config: dict):
+    """Build the orphan-comparison provider for a batch site config.
+
+    Batch sites do not carry --urls-file/--sitemap-url flags, so they keep the
+    single-site default: probe ``<origin>/sitemap.xml`` and skip orphan
+    comparison when it is absent.
+    """
+
+    def provider(fetcher: Fetcher) -> list[str] | None:
+        candidate = f"{origin(config['seed'])}/sitemap.xml"
+        result = fetcher.fetch(candidate, method="GET", max_body_bytes=2 * 1024 * 1024)
+        if result.status_code != 200 or result.error:
+            return None
+        try:
+            return parse_sitemap(
+                result.text,
+                fetch=lambda child: _fetch_sitemap_text(fetcher, child),
+                base_url=candidate,
+            )
+        except SitemapError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            return None
+
+    return provider
+
+def _batch_scan(args) -> int:
+    manifest = load_manifest(args.manifest)
+    if args.max_concurrency is not None:
+        if isinstance(args.max_concurrency, bool) or not 1 <= args.max_concurrency <= 64:
+            raise ConfigError("--max-concurrency must be between 1 and 64")
+        manifest.max_concurrency = args.max_concurrency
+
+    # Resolve the shared database first so a disagreement across sites yields
+    # exit code 3 before any crawling starts.
+    from .batch import _resolve_database
+
+    database = _resolve_database(manifest)
+    limiter = GlobalLimiter(manifest.max_concurrency)
+    store = Store(database)
+    try:
+        result = run_batch(
+            manifest,
+            store,
+            limiter,
+            provider_factory=_auto_sitemap_provider,
+        )
+    finally:
+        store.close()
+    print(format_summary(result))
+    return result.exit_code
 
 def _report(args) -> int:
     store = Store(args.db)
@@ -265,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "scan":
             return _scan(args)
+        if args.command == "batch-scan":
+            return _batch_scan(args)
         if args.command == "report":
             return _report(args)
         if args.command == "serve":

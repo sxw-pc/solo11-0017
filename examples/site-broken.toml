@@ -1,0 +1,9 @@
+# Deliberately invalid site config used by batch.example.toml.
+# A non-http(s) seed fails validation; batch-scan records this entry with
+# status "invalid", isolates it, and continues with the remaining sites.
+seed = "ftp://127.0.0.1/not-http"
+
+[output]
+dir = "reports/batch/broken"
+database = "out/linkpatrol.db"
+sitemap = "out/sitemaps/broken.xml"

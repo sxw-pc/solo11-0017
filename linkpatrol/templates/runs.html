@@ -3,12 +3,20 @@
 <h1>Scan runs</h1>
 {% if runs %}
 <table>
-  <thead><tr><th>Run</th><th>Seed</th><th>Status</th><th>Started</th>
+  <thead><tr><th>Run</th><th>Site</th><th>Seed</th><th>Status</th><th>Started</th>
     <th>Pages</th><th>Broken</th><th></th></tr></thead>
   <tbody>
   {% for run in runs %}
     <tr>
       <td>#{{ run.id }}</td>
+      <td>
+        {% if run.site_name %}
+          <code>{{ run.site_name }}</code>
+          {% if run.batch_id %}<span class="muted"> (batch #{{ run.batch_id }})</span>{% endif %}
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
       <td><code>{{ run.seed }}</code></td>
       <td><span class="pill">{{ run.status }}</span></td>
       <td class="muted">{{ run.started_at }}</td>

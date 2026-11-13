@@ -1,0 +1,7 @@
+# Normalize all text files to LF in the repository so line endings never
+# produce whole-file diffs across platforms/editors.
+* text=auto eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.html text eol=lf

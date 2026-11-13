@@ -1,0 +1,41 @@
+# Batch inspection manifest for `linkpatrol batch-scan`.
+#
+# The [batch] table applies to the whole run:
+#   max_concurrency - hard upper bound on total HTTP requests in flight across
+#                     every site at the same time. Each site still keeps its own
+#                     limits.concurrency pool and limits.delay_ms throttle.
+#   database        - shared SQLite database every site writes into. When
+#                     omitted all site configs must agree on output.database.
+#   reports_dir     - when set, each site's reports land in reports_dir/<name>/.
+#   sitemap_dir     - when set, each site's sitemap is written as
+#                     sitemap_dir/<name>.xml.
+#
+# Every [[sites]] entry references an ordinary single-site scan.toml, so site
+# configuration and validation are identical to `linkpatrol scan`. Two entries
+# resolving to the same host (hostname plus non-default port) are merged: only
+# the first is crawled and later ones are recorded with status "skipped".
+
+[batch]
+max_concurrency = 4
+database = "out/linkpatrol.db"
+reports_dir = "reports/batch"
+sitemap_dir = "out/sitemaps"
+
+[[sites]]
+name = "demo"
+config = "site-demo.toml"
+
+[[sites]]
+# Same host as "demo" but a different seed path: merged, never crawled twice.
+name = "demo-duplicate"
+config = "site-demo-duplicate.toml"
+
+[[sites]]
+name = "slow-polite"
+config = "site-slow.toml"
+
+[[sites]]
+# Deliberately invalid (non-http seed) to demonstrate failure isolation: the
+# entry is stored with status "invalid" and the other sites still run.
+name = "broken-config"
+config = "site-broken.toml"

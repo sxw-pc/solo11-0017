@@ -1,0 +1,28 @@
+# A rate-limit-sensitive site: serial workers and a long polite delay.
+# In a batch these limits stay per-site even while other sites run faster,
+# and the global max_concurrency still caps total in-flight requests.
+seed = "http://127.0.0.1:5002/"
+
+[limits]
+max_depth = 2
+max_pages = 40
+timeout_s = 8.0
+retries = 1
+delay_ms = 1000
+concurrency = 1
+max_redirects = 5
+
+[robots]
+respect = true
+user_agent = "linkpatrol-batch/0.1"
+
+[external]
+check = false
+
+[normalize]
+drop_params = []
+
+[output]
+dir = "reports/batch/slow-polite"
+database = "out/linkpatrol.db"
+sitemap = "out/sitemaps/slow-polite.xml"

@@ -1,0 +1,28 @@
+# Same host as site-demo.toml but a different seed path. In a batch manifest
+# this entry is merged into the first entry for the same host and never
+# crawled a second time.
+seed = "http://127.0.0.1:5001/about"
+
+[limits]
+max_depth = 2
+max_pages = 30
+timeout_s = 3.0
+retries = 2
+delay_ms = 20
+concurrency = 1
+max_redirects = 5
+
+[robots]
+respect = true
+user_agent = "linkpatrol-batch/0.1"
+
+[external]
+check = true
+
+[normalize]
+drop_params = ["utm_*", "fbclid"]
+
+[output]
+dir = "reports/batch/demo-duplicate"
+database = "out/linkpatrol.db"
+sitemap = "out/sitemaps/demo-duplicate.xml"

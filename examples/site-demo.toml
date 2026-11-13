@@ -1,0 +1,27 @@
+# Single-site config referenced by batch.example.toml.
+# Point the seed at a site you own or are authorized to inspect.
+seed = "http://127.0.0.1:5001/"
+
+[limits]
+max_depth = 3
+max_pages = 60
+timeout_s = 3.0
+retries = 2
+delay_ms = 20
+concurrency = 2
+max_redirects = 5
+
+[robots]
+respect = true
+user_agent = "linkpatrol-batch/0.1"
+
+[external]
+check = true
+
+[normalize]
+drop_params = ["utm_*", "fbclid"]
+
+[output]
+dir = "reports/batch/demo"
+database = "out/linkpatrol.db"
+sitemap = "out/sitemaps/demo.xml"
