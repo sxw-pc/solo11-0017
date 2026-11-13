@@ -7,7 +7,10 @@ import json
 import sys
 from pathlib import Path
 
-from .baseline import BaselineError, IgnoreRules, diff_runs, exit_code_for, summary_text
+from .baseline import (
+    BaselineError, IgnoreRules, diff_runs, exit_code_for, register_ignore_version,
+    summary_text,
+)
 from .checker import check_links
 from .config import ConfigError, load_config
 from .crawler import crawl_site
@@ -29,6 +32,10 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument("--config", required=True)
     scan.add_argument("--urls-file", help="listed URLs for orphan comparison")
     scan.add_argument("--sitemap-url", help="remote sitemap used for orphan comparison")
+    scan.add_argument(
+        "--ignore",
+        help="TOML ignore list; versioned, fingerprinted, and bound to this run",
+    )
 
     report = sub.add_parser("report", help="regenerate reports for a run")
     report.add_argument("--db", default="out/linkpatrol.db")
@@ -102,8 +109,10 @@ def _listed_urls(args, config: dict, fetcher: Fetcher) -> list[str] | None:
 def _scan(args) -> int:
     config = load_config(args.config)
     limits = config["limits"]
+    ignore = IgnoreRules.load(args.ignore)
     store = Store(config["output"]["database"])
-    run_id = store.create_run(config["seed"], config)
+    ignore_version_id = register_ignore_version(store, ignore)
+    run_id = store.create_run(config["seed"], config, ignore_version_id)
     fetcher = Fetcher(
         timeout_s=limits["timeout_s"],
         retries=limits["retries"],
@@ -139,13 +148,15 @@ def _scan(args) -> int:
                 "findings": findings,
                 "write_errors": len(store.write_errors),
                 "sitemap_urls": len(entries),
+                "ignore_version_id": ignore_version_id,
             }
         )
         store.finish_run(run_id, "completed", stats)
         json_path, html_path = write_reports(store, run_id, config["output"]["dir"])
         print(
             f"run {run_id}: pages={len(crawl.pages)} checks={len(checks.checks)} "
-            f"broken={len(checks.broken)} reports={json_path},{html_path}"
+            f"broken={len(checks.broken)} ignore_version={ignore_version_id} "
+            f"reports={json_path},{html_path}"
         )
         return 0
     except Exception:
@@ -232,7 +243,9 @@ def _baseline(args) -> int:
 def _diff(args) -> int:
     store = Store(args.db)
     try:
-        ignore = IgnoreRules.load(args.ignore)
+        # Keep None (not an empty rule set) so diff_runs uses the run's stored
+        # version instead of treating an omitted --ignore as an explicit override.
+        ignore = IgnoreRules.load(args.ignore) if args.ignore else None
         diff = diff_runs(store, args.baseline, args.run, ignore)
         store.merge_stats(
             args.run,
@@ -240,7 +253,10 @@ def _diff(args) -> int:
                 "last_diff": {
                     "baseline": args.baseline,
                     "baseline_run": diff["baseline_run"],
+                    "baseline_ignore_version": diff["baseline_ignore_version"],
+                    "current_ignore_version": diff["current_ignore_version"],
                     "summary": diff["summary"],
+                    "notes": diff["notes"],
                 }
             },
         )

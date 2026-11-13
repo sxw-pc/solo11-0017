@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .schema import SCHEMA
+from .schema import IMPLICIT_FINGERPRINT, IMPLICIT_VERSION_ID, SCHEMA
 
 class BaselineExistsError(ValueError):
     """Raised when setting an existing baseline without force."""
@@ -29,8 +29,35 @@ class Store:
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
         self.write_errors: list[str] = []
+
+    def _migrate(self) -> None:
+        """Bring pre-versioning databases up to date without losing history."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO ignore_versions(id, fingerprint, rules_json, "
+            "rule_count, created_at) VALUES (?, ?, '[]', 0, ?)",
+            (IMPLICIT_VERSION_ID, IMPLICIT_FINGERPRINT, _now()),
+        )
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "ignore_version_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE runs ADD COLUMN ignore_version_id INTEGER NOT NULL "
+                f"DEFAULT {IMPLICIT_VERSION_ID}"
+            )
+        self.conn.execute(
+            "UPDATE runs SET ignore_version_id = ? "
+            "WHERE ignore_version_id IS NULL OR ignore_version_id = ''",
+            (IMPLICIT_VERSION_ID,),
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_ignore_version "
+            "ON runs(ignore_version_id)"
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -57,14 +84,64 @@ class Store:
             self.write_errors.append(str(exc))
             return False
 
-    def create_run(self, seed: str, config: dict) -> int:
+    def create_run(
+        self,
+        seed: str,
+        config: dict,
+        ignore_version_id: int = IMPLICIT_VERSION_ID,
+    ) -> int:
         cursor = self.conn.execute(
-            "INSERT INTO runs(seed, config_json, started_at, status, stats_json) "
-            "VALUES (?, ?, ?, 'running', '{}')",
-            (seed, json.dumps(config, sort_keys=True), _now()),
+            "INSERT INTO runs(seed, config_json, started_at, status, stats_json, "
+            "ignore_version_id) VALUES (?, ?, ?, 'running', '{}', ?)",
+            (seed, json.dumps(config, sort_keys=True), _now(), ignore_version_id),
         )
         self.conn.commit()
         return int(cursor.lastrowid)
+
+    def ensure_ignore_version(self, fingerprint: str, rules: list[dict]) -> int:
+        """Return the id of the rule version with ``fingerprint``, creating it once.
+
+        Repeated calls with the same fingerprint reuse one row, so re-scanning an
+        unchanged (or merely reordered) ignore list never grows the table.
+        """
+        existing = self.conn.execute(
+            "SELECT id FROM ignore_versions WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
+        cursor = self.conn.execute(
+            "INSERT INTO ignore_versions(fingerprint, rules_json, rule_count, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            (
+                fingerprint,
+                json.dumps(rules, sort_keys=True),
+                len(rules),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def get_ignore_version(self, version_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM ignore_versions WHERE id = ?", (version_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["rules"] = json.loads(data.pop("rules_json") or "[]")
+        return data
+
+    def get_run_ignore_version_id(self, run_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT ignore_version_id FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"run not found: {run_id}")
+        version_id = row["ignore_version_id"]
+        if version_id is None:
+            return IMPLICIT_VERSION_ID
+        return int(version_id)
 
     def finish_run(self, run_id: int, status: str = "completed",
                    stats: dict | None = None) -> None:

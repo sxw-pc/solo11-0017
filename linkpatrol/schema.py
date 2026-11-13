@@ -1,6 +1,13 @@
 """SQLite schema shared by the store and tests."""
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS ignore_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    rules_json TEXT NOT NULL,
+    rule_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     seed TEXT NOT NULL,
@@ -8,7 +15,9 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT NOT NULL,
     finished_at TEXT,
     status TEXT NOT NULL DEFAULT 'running',
-    stats_json TEXT NOT NULL DEFAULT '{}'
+    stats_json TEXT NOT NULL DEFAULT '{}',
+    ignore_version_id INTEGER NOT NULL DEFAULT 0
+        REFERENCES ignore_versions(id) ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS pages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,3 +64,9 @@ CREATE INDEX IF NOT EXISTS idx_pages_run ON pages(run_id);
 CREATE INDEX IF NOT EXISTS idx_links_run_source ON links(run_id, source_url);
 CREATE INDEX IF NOT EXISTS idx_checks_run_ok ON checks(run_id, ok);
 """
+
+# The implicit version every pre-versioning run is attributed to during migration.
+# It carries an empty rule set: historical runs predate persisted ignore rules, so
+# nothing can be reconstructed for them and every broken link remains reportable.
+IMPLICIT_VERSION_ID = 0
+IMPLICIT_FINGERPRINT = "v0-implicit-empty"

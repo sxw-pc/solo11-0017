@@ -54,7 +54,8 @@ SQLite 开启外键与 WAL。写入按行使用 savepoint；单条失败回滚�
 
 | 表 | 字段 | 唯一约束 |
 | --- | --- | --- |
-| `runs` | `id, seed, config_json, started_at, finished_at, status, stats_json` | 主键 `id` |
+| `ignore_versions` | `id, fingerprint, rules_json, rule_count, created_at` | `fingerprint` 唯一 |
+| `runs` | `id, seed, config_json, started_at, finished_at, status, stats_json, ignore_version_id` | 主键 `id` |
 | `pages` | `id, run_id, url, depth, status_code, content_hash, duration_ms, error` | `(run_id, url)` |
 | `links` | `id, run_id, source_url, target_url, raw_href, kind, scope, line_no, anchor` | `(run_id, source_url, target_url, kind)` |
 | `checks` | `id, run_id, url, final_url, status_code, redirect_chain_json, anchor_ok, ok, error, checked_at` | `(run_id, url)` |
@@ -64,6 +65,21 @@ SQLite 开启外键与 WAL。写入按行使用 savepoint；单条失败回滚�
 载目标、原文、类型 (`page/asset/form`)、范围 (`internal/external/anchor/mailto/tel/other`)
 和行号；`checks` 保存最终 URL、重定向链、锚点结果和结论。每次 `scan` 创建新
 run，不覆盖历史。
+
+### 忽略规则版本化
+
+忽略清单是带版本号、落库的实体，而不是 diff 时临时读取的扁平文件：
+
+- 每次 `scan --ignore` 开始时，生效的忽略清单被规范化（规则去重、条目与
+  `status` 排序）后计算 sha256 指纹，连同规则 JSON 写入 `ignore_versions`；
+  指纹已存在则复用同一行，所以**语义相同但书写顺序不同的清单不会产生新版本**。
+- 新 run 通过 `runs.ignore_version_id` 外键绑定该版本；`diff` 时两个 run 各自
+  按自己绑定版本的规则分别判定后再比较，不再套用当前文件，因此事后修改忽略文件
+  不会让历史 run 的「新增断链」集合失真。
+- 无版本字段的旧库在打开时自动迁移：历史 run 全部归入 id=0 的「v0 隐式版本」
+  （空规则集，断链一律可报告），历史数据不丢失；新老版本混合 diff 不报错，而是
+  在输出的 `notes` 里说明两侧版本差异与 v0 含义。
+- `diff --ignore` 仍可使用，但定位为对当前 run 一侧的一次性覆盖，`notes` 会注明。
 
 ## 配置
 
@@ -130,7 +146,8 @@ sitemap = "out/sitemap.xml"
 
 ```bash
 python -m linkpatrol demo --port 5001
-python -m linkpatrol scan --config examples/scan.demo.toml
+python -m linkpatrol scan --config examples/scan.demo.toml \
+  --ignore examples/ignores.example.toml
 python -m linkpatrol report --db out/linkpatrol.db --run 1 --out reports
 python -m linkpatrol serve --db out/linkpatrol.db --port 5002
 python -m linkpatrol sitemap --db out/linkpatrol.db --run 1 --out out/sitemap.xml
@@ -139,8 +156,12 @@ python -m linkpatrol sitemap --parse-file out/sitemap.xml
 python -m linkpatrol baseline set --name prod --run 1 --db out/linkpatrol.db
 python -m linkpatrol baseline list --db out/linkpatrol.db
 python -m linkpatrol diff --baseline prod --run 2 --db out/linkpatrol.db \
-  --ignore examples/ignores.example.toml --fail-on new-broken
+  --fail-on new-broken
 ```
+
+`scan` 用 `--ignore` 指定忽略清单：该清单会被指纹化并作为一个版本落库，run 绑定
+其版本号；不带 `--ignore` 的 scan 绑定空规则版本。`diff` 默认使用两个 run 各自
+绑定的规则版本分别判定，仅在需要临时覆盖当前 run 一侧时才再传 `--ignore`。
 
 `scan` 还接受 `--urls-file` 或 `--sitemap-url` 指定孤儿页对比清单；未指定时会尝试
 seed 源站的 `/sitemap.xml`。`serve` 提供 `/`、`/runs/<id>`（按状态/类型过滤）和
@@ -156,8 +177,10 @@ seed 源站的 `/sitemap.xml`。`serve` 提供 `/`、`/runs/<id>`（按状态/�
 | `3` | 配置错误 |
 
 `diff` 的断链身份是 `(source_url, target_url)`，输出 `new_broken/fixed/persistent`
-三类 JSON，并把最近一次摘要写入当前 run 的 `stats_json.last_diff`。忽略规则只在
-判定 `new_broken` 时生效。
+三类 JSON，并把最近一次摘要（含两侧规则版本与 `notes`）写入当前 run 的
+`stats_json.last_diff`。忽略规则只在判定 `new_broken` 时生效；baseline 侧与当前
+侧分别应用各自 run 绑定版本的规则，两侧版本不同或涉及 v0 隐式版本时在 `notes`
+给出可解释说明而不是报错。
 
 ## 快速上手
 
