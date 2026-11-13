@@ -30,9 +30,18 @@ def create_demo_app() -> Flask:
     app = Flask(__name__)
     counters: dict[str, int] = defaultdict(int)
     app.config["DEMO_COUNTERS"] = counters
+    # Scan-phase state used to demonstrate a broken-then-fixed history.
+    app.config["SCAN_COUNT"] = 0
+    app.config["REGRESSION_MODE"] = "auto"
 
     @app.get("/")
     def home():
+        ua = request.headers.get("User-Agent", "").lower()
+        if not ua.startswith("mozilla"):
+            # Every crawler/scanner fetches the seed exactly once per run,
+            # so consecutive scans can demonstrate a broken-then-fixed
+            # history: the probe is broken for the first two runs.
+            app.config["SCAN_COUNT"] += 1
         body = """
 <div class="box">
 <p>This local site intentionally contains several classes of link defects.</p>
@@ -41,6 +50,7 @@ def create_demo_app() -> Flask:
 <p><a href="/missing">A 404 link</a> · <a href="/server-error">A 500 link</a> ·
 <a href="/hop-1">A three-hop redirect</a> · <a href="/loop-a">A redirect loop</a></p>
 <p><a href="/flaky">An initially unstable page</a> · <a href="/slow">A slow page</a> ·
+<a href="/regression">A regression probe</a> ·
 <a href="/private/secret">A robots-disallowed page</a></p>
 <p><img src="/assets/missing.png" alt="missing"> <img src="/assets/logo.png" alt="logo"></p>
 <form action="/search" method="get"><input name="q"><button>Search</button></form>
@@ -48,6 +58,43 @@ def create_demo_app() -> Flask:
 <a href="tel:+10000000000">Phone</a> · <a href="javascript:void(0)">Script</a></p>
 </div>"""
         return _page("Demo home", body)
+
+    def regression_state() -> bool:
+        mode = app.config["REGRESSION_MODE"]
+        if mode == "broken":
+            return True
+        if mode == "ok":
+            return False
+        return app.config["SCAN_COUNT"] <= 2
+
+    @app.get("/regression")
+    def regression():
+        if regression_state():
+            abort(404)
+        return _page("Regression probe", '<p>This page recovered. <a href="/">Home</a>.</p>')
+
+    @app.get("/__demo/state")
+    def demo_state():
+        return Response(
+            f'{{"scan_count": {app.config["SCAN_COUNT"]}, '
+            f'"regression_mode": "{app.config["REGRESSION_MODE"]}", '
+            f'"regression_broken": {str(regression_state()).lower()}}}',
+            content_type="application/json",
+        )
+
+    @app.get("/__demo/regression/<mode>")
+    def demo_regression_mode(mode: str):
+        if mode not in {"auto", "broken", "ok"}:
+            abort(400)
+        app.config["REGRESSION_MODE"] = mode
+        return demo_state()
+
+    @app.get("/__demo/reset")
+    def demo_reset():
+        app.config["SCAN_COUNT"] = 0
+        app.config["REGRESSION_MODE"] = "auto"
+        counters.clear()
+        return demo_state()
 
     @app.get("/about")
     def about():

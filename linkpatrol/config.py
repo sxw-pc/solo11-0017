@@ -38,6 +38,10 @@ DEFAULTS: dict[str, Any] = {
         "database": "out/linkpatrol.db",
         "sitemap": "out/sitemap.xml",
     },
+    "retention": {
+        "keep_runs": None,
+        "retain_days": None,
+    },
 }
 
 def _merge(defaults: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +128,17 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for key in ("dir", "database", "sitemap"):
         if not isinstance(output[key], str) or not output[key].strip():
             raise ConfigError(f"output.{key} must be a non-empty path")
+
+    retention = config["retention"]
+    if retention["keep_runs"] is not None:
+        _as_int(retention, "keep_runs", 0, 1000000)
+    retain_days = retention["retain_days"]
+    if retain_days is not None:
+        if isinstance(retain_days, bool) or not isinstance(retain_days, (int, float)):
+            raise ConfigError("retention.retain_days must be a number")
+        if retain_days < 0:
+            raise ConfigError("retention.retain_days must be >= 0")
+        retention["retain_days"] = float(retain_days)
     return config
 
 def load_config(path: str | Path) -> dict[str, Any]:

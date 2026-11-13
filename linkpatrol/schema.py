@@ -51,7 +51,38 @@ CREATE TABLE IF NOT EXISTS baselines (
     run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS timeline_runs (
+    run_id INTEGER PRIMARY KEY,
+    seed TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    checks_total INTEGER NOT NULL,
+    broken_total INTEGER NOT NULL,
+    new_broken_total INTEGER NOT NULL,
+    fixed_total INTEGER NOT NULL,
+    archived_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS timeline_broken (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES timeline_runs(run_id) ON DELETE CASCADE,
+    source_url TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    status_code INTEGER,
+    error TEXT,
+    is_new INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(run_id, source_url, target_url)
+);
+CREATE TABLE IF NOT EXISTS timeline_fixed (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES timeline_runs(run_id) ON DELETE CASCADE,
+    source_url TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    UNIQUE(run_id, source_url, target_url)
+);
 CREATE INDEX IF NOT EXISTS idx_pages_run ON pages(run_id);
 CREATE INDEX IF NOT EXISTS idx_links_run_source ON links(run_id, source_url);
 CREATE INDEX IF NOT EXISTS idx_checks_run_ok ON checks(run_id, ok);
+CREATE INDEX IF NOT EXISTS idx_timeline_broken_target ON timeline_broken(target_url, run_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_broken_run ON timeline_broken(run_id);
 """

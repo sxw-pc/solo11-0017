@@ -30,3 +30,9 @@ drop_params = ["utm_*", "fbclid"]
 dir = "reports"
 database = "out/linkpatrol.db"
 sitemap = "out/sitemap.xml"
+
+# Used by `linkpatrol archive --config <this file>`; omitted keys mean
+# "no count limit" or "no age limit". Baseline-pinned runs are never archived.
+# [retention]
+# keep_runs = 10
+# retain_days = 30

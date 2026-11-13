@@ -1,7 +1,11 @@
 """End-to-end CLI scenario: scan, report, baseline, and CI exit code."""
 
 import json
+import threading
 from pathlib import Path
+
+import pytest
+from werkzeug.serving import make_server
 
 from linkpatrol.cli import main
 from linkpatrol.demoapp import create_demo_app
@@ -76,10 +80,144 @@ def test_full_cli_regression_workflow(reset_mock, tmp_path, capsys):
                  "--out", str(sitemap_out)]) == 0
     assert sitemap_out.is_file()
 
+def test_archive_uses_retention_config(reset_mock, tmp_path, capsys):
+    config_path = write_config(tmp_path, reset_mock.base_url)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n[retention]\nkeep_runs = 1\n",
+        encoding="utf-8",
+    )
+    database = tmp_path / "out" / "linkpatrol.db"
+    for _ in range(3):
+        assert main(["scan", "--config", str(config_path)]) == 0
+    capsys.readouterr()
+    assert main(["archive", "--config", str(config_path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["archived"] == [1, 2] and result["kept"] == [3]
+    assert (tmp_path / "reports" / "run_1.json").is_file() is False
+    assert (tmp_path / "reports" / "run_3.json").is_file() is True
+
+
 def test_config_error_returns_three(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text('seed = "ftp://127.0.0.1/resource"\n')
     assert main(["scan", "--config", str(path)]) == 3
+
+
+def test_archive_and_timeline_cli_workflow(reset_mock, tmp_path, capsys):
+    config_path = write_config(tmp_path, reset_mock.base_url)
+    database = tmp_path / "out" / "linkpatrol.db"
+    reports = tmp_path / "reports"
+    target = reset_mock.base_url + "/regression"
+
+    # Run 1: healthy. Run 2/3: the target becomes broken. Run 4: it is fixed.
+    assert main(["scan", "--config", str(config_path)]) == 0
+    reset_mock.app.config["REGRESSION_BROKEN"] = True
+    assert main(["scan", "--config", str(config_path)]) == 0
+    assert main(["scan", "--config", str(config_path)]) == 0
+    reset_mock.app.config["REGRESSION_BROKEN"] = False
+    assert main(["scan", "--config", str(config_path)]) == 0
+
+    # Pin run 1 to a baseline; it must survive archiving untouched.
+    assert main(["baseline", "set", "--name", "prod", "--run", "1",
+                 "--db", str(database)]) == 0
+
+    capsys.readouterr()
+    assert main(["archive", "--db", str(database), "--reports", str(reports),
+                 "--keep", "1"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["protected"] == [1]
+    assert result["archived"] == [2, 3]
+    assert (reports / "run_1.json").is_file() and (reports / "run_1.html").is_file()
+    assert not (reports / "run_2.json").exists()
+    assert not (reports / "run_3.json").exists()
+    assert (reports / "run_4.json").is_file()
+
+    store = Store(database)
+    try:
+        for run_id in (2, 3):
+            assert store.get_run(run_id) is None
+            assert store.run_detail_counts(run_id) == {
+                "pages": 0, "links": 0, "checks": 0}
+        assert store.get_run(1) is not None
+        assert store.run_detail_counts(1)["checks"] > 0
+        assert store.get_baseline("prod")["run_id"] == 1
+    finally:
+        store.close()
+
+    capsys.readouterr()
+    assert main(["timeline", "--db", str(database), "--url", target]) == 0
+    history = json.loads(capsys.readouterr().out)
+    assert history["first_broken_run"] == 2
+    assert history["fix_runs"] == [4]
+    assert history["spans"][0]["run_ids"] == [2, 3]
+    assert history["spans"][0]["fixed_run"] == 4
+
+    capsys.readouterr()
+    assert main(["timeline", "--db", str(database), "--runs"]) == 0
+    runs = json.loads(capsys.readouterr().out)["runs"]
+    assert [row["run_id"] for row in runs] == [1, 2, 3, 4]
+    assert [row["archived"] for row in runs] == [False, True, True, False]
+
+
+@pytest.fixture
+def demo_site():
+    """The built-in demo site on a random local port, with reset helpers."""
+    app = create_demo_app()
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_demo_site_archive_timeline_acceptance(demo_site, tmp_path, capsys):
+    """Acceptance: broken-then-fixed history survives archival intact."""
+    config_path = write_config(tmp_path, demo_site)
+    database = tmp_path / "out" / "linkpatrol.db"
+    reports = tmp_path / "reports"
+    target = demo_site + "/regression"
+
+    # Runs 1-2: the probe is broken. Run 3: it is fixed.
+    for _ in range(3):
+        assert main(["scan", "--config", str(config_path)]) == 0
+    assert main(["baseline", "set", "--name", "pinned", "--run", "2",
+                 "--db", str(database)]) == 0
+
+    capsys.readouterr()
+    assert main(["archive", "--db", str(database), "--reports", str(reports),
+                 "--keep", "1"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["archived"] == [1]
+    assert result["protected"] == [2]
+    assert (reports / "run_2.json").is_file()
+    assert not (reports / "run_1.json").exists()
+    assert (reports / "run_3.json").is_file()
+
+    store = Store(database)
+    try:
+        assert store.get_run(1) is None
+        assert store.run_detail_counts(1) == {"pages": 0, "links": 0, "checks": 0}
+        assert store.get_run(2) is not None
+        assert store.run_detail_counts(2)["checks"] > 0
+        assert store.get_baseline("pinned")["run_id"] == 2
+    finally:
+        store.close()
+
+    capsys.readouterr()
+    assert main(["timeline", "--db", str(database), "--url", target]) == 0
+    history = json.loads(capsys.readouterr().out)
+    assert history["first_broken_run"] == 1
+    assert history["fix_runs"] == [3]
+    assert history["spans"][0]["run_ids"] == [1, 2]
+    assert history["spans"][0]["fixed_run"] == 3
+    assert history["currently_broken"] is False
+    # The archived run 1 and the still-live run 2 answer the same timeline.
+    assert [entry["archived"] for entry in history["entries"]] == [True, False, False]
 
 
 def test_demo_site_exercises_all_scenarios():

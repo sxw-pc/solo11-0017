@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .baseline import BaselineError, IgnoreRules, diff_runs, exit_code_for, summary_text
+from .archive import ArchiveError, archive_runs, plan_archive
 from .checker import check_links
 from .config import ConfigError, load_config
 from .crawler import crawl_site
@@ -16,6 +17,7 @@ from .orphans import compute_findings, load_url_list
 from .report import write_reports
 from .sitemap import SitemapError, generate_sitemap, parse_sitemap, parse_sitemap_file
 from .store import BaselineExistsError, Store
+from .timeline import run_timeline, url_history
 from .urlnorm import origin
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,6 +70,32 @@ def _parser() -> argparse.ArgumentParser:
     diff.add_argument("--ignore")
     diff.add_argument("--fail-on", choices=["new-broken", "none"], default="none")
     diff.add_argument("--json-out")
+
+    archive = sub.add_parser(
+        "archive", help="delete old run details after keeping a timeline record"
+    )
+    archive.add_argument("--db", default=None,
+                         help="database path (default: out/linkpatrol.db)")
+    archive.add_argument("--reports", default=None,
+                         help="report directory to clean (default: reports)")
+    archive.add_argument("--config", help="scan config supplying [retention] defaults")
+    archive.add_argument("--keep", type=int, default=None,
+                         help="number of newest runs to keep")
+    archive.add_argument("--retain-days", type=float, default=None,
+                         help="only archive runs at least this many days old")
+    archive.add_argument("--dry-run", action="store_true",
+                         help="show the plan without changing anything")
+    archive.add_argument("--json-out")
+
+    timeline = sub.add_parser(
+        "timeline", help="query archived run summaries and URL history"
+    )
+    timeline.add_argument("--db", default="out/linkpatrol.db")
+    timeline.add_argument("--url", help="target URL whose history to show")
+    timeline.add_argument("--seed", help="restrict history to one seed")
+    timeline.add_argument("--runs", action="store_true",
+                          help="list one summary row per run")
+    timeline.add_argument("--json-out")
     return parser
 
 def _fetch_sitemap_text(fetcher: Fetcher, url: str) -> str:
@@ -254,6 +282,82 @@ def _diff(args) -> int:
     print(summary_text(diff), file=sys.stderr)
     return exit_code_for(diff, args.fail_on)
 
+def _archive(args) -> int:
+    keep = args.keep
+    retain_days = args.retain_days
+    db_path = args.db
+    report_dir = args.reports
+    if args.config:
+        config = load_config(args.config)
+        retention = config.get("retention", {})
+        if keep is None:
+            keep = retention.get("keep_runs")
+        if retain_days is None:
+            retain_days = retention.get("retain_days")
+        if db_path is None:
+            db_path = config["output"]["database"]
+        if report_dir is None:
+            report_dir = config["output"]["dir"]
+    if db_path is None:
+        db_path = "out/linkpatrol.db"
+    if report_dir is None:
+        report_dir = "reports"
+    store = Store(db_path)
+    try:
+        if args.dry_run:
+            plan = plan_archive(store, keep_runs=keep, retain_days=retain_days)
+            result = {
+                "archived": plan.archived,
+                "protected": plan.protected,
+                "kept": plan.kept,
+                "dry_run": True,
+            }
+        else:
+            requested = plan_archive(store, keep_runs=keep, retain_days=retain_days)
+            result = archive_runs(
+                store,
+                [*requested.archived, *requested.protected],
+                report_dir=report_dir,
+            )
+            result["kept"] = requested.kept
+            result["dry_run"] = False
+    finally:
+        store.close()
+    rendered = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.json_out:
+        Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json_out).write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    print(
+        f"archived={len(result['archived'])} protected={len(result['protected'])} "
+        f"kept={len(result.get('kept', []))}",
+        file=sys.stderr,
+    )
+    return 0
+
+def _timeline(args) -> int:
+    store = Store(args.db)
+    try:
+        if args.url:
+            result = url_history(store, args.url, seed=args.seed)
+        else:
+            result = {"runs": run_timeline(store, seed=args.seed)}
+    finally:
+        store.close()
+    rendered = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.json_out:
+        Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json_out).write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    if args.url and result["first_broken_run"] is not None:
+        print(
+            f"first_broken_run={result['first_broken_run']} "
+            f"last_fixed_run={result['last_fixed_run']} "
+            f"currently_broken={result['currently_broken']}",
+            file=sys.stderr,
+        )
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch, translating expected errors to exit codes."""
     args = _parser().parse_args(argv)
@@ -275,13 +379,17 @@ def main(argv: list[str] | None = None) -> int:
             return _baseline(args)
         if args.command == "diff":
             return _diff(args)
+        if args.command == "archive":
+            return _archive(args)
+        if args.command == "timeline":
+            return _timeline(args)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 3
     except (BaselineError, BaselineExistsError) as exc:
         print(f"baseline error: {exc}", file=sys.stderr)
         return 1
-    except (SitemapError, FileNotFoundError, ValueError) as exc:
+    except (ArchiveError, SitemapError, FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 1

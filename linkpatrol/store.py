@@ -274,3 +274,245 @@ class Store:
         cursor = self.conn.execute("DELETE FROM baselines WHERE name = ?", (name,))
         self.conn.commit()
         return cursor.rowcount > 0
+
+    # ---- archive / timeline -------------------------------------------------
+
+    def begin_immediate(self) -> None:
+        """Start one explicit write transaction owned by the caller."""
+        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def commit(self) -> None:
+        self.conn.commit()
+
+    def rollback(self) -> None:
+        self.conn.rollback()
+
+    def protected_run_ids(self) -> list[int]:
+        """Every run id currently referenced by a named baseline."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT run_id FROM baselines ORDER BY run_id"
+        ).fetchall()
+        return [int(row["run_id"]) for row in rows]
+
+    def previous_run_id(self, run_id: int, seed: str | None = None) -> int | None:
+        """The previous completed run, optionally restricted to one seed.
+
+        Failed or still-running scans are skipped because their conclusions
+        are not comparable: treating them as "no broken links" would fabricate
+        fixes, and treating them as "all broken" would fabricate regressions.
+        Archived runs participate through their timeline record, so a run
+        archived earlier can still serve as the comparison baseline.
+        """
+        live_clause = "id < ? AND status = 'completed'"
+        timeline_clause = "run_id < ? AND status = 'completed'"
+        params: list[Any] = [run_id]
+        if seed is not None:
+            live_clause += " AND seed = ?"
+            timeline_clause += " AND seed = ?"
+            params.append(seed)
+        rows = self.conn.execute(
+            f"SELECT id FROM runs WHERE {live_clause} "
+            f"UNION SELECT run_id FROM timeline_runs WHERE {timeline_clause} "
+            "ORDER BY id DESC LIMIT 1",
+            [*params, *params],
+        ).fetchall()
+        return int(rows[0][0]) if rows else None
+
+    def broken_records_for_run(self, run_id: int) -> list[dict]:
+        """One broken record per target URL for a live or archived run.
+
+        A URL can be linked from many sources in one run; the first source
+        (sorted order) is kept so the timeline stays one row per URL per run
+        and results are identical before and after archiving.
+        """
+        if self.get_run(run_id) is not None:
+            rows = self.broken_identities(run_id)
+        else:
+            rows = self.get_timeline_broken(run_id=run_id)
+        by_target: dict[str, dict] = {}
+        for row in sorted(rows, key=lambda item: (item["target_url"], item["source_url"])):
+            url = str(row["target_url"])
+            if url not in by_target:
+                by_target[url] = {
+                    "source_url": row["source_url"],
+                    "target_url": url,
+                    "status_code": row.get("status_code"),
+                    "error": row.get("error"),
+                }
+        return [by_target[key] for key in sorted(by_target)]
+
+    def run_detail_counts(self, run_id: int) -> dict:
+        pages = self.conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        links = self.conn.execute(
+            "SELECT COUNT(*) FROM links WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        checks = self.conn.execute(
+            "SELECT COUNT(*) FROM checks WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        return {"pages": int(pages), "links": int(links), "checks": int(checks)}
+
+    def write_archive(self, entries: list[dict], run_ids: list[int]) -> None:
+        """Insert timeline rows and delete run details inside an open transaction.
+
+        The caller must wrap this in :meth:`begin_immediate` / :meth:`commit`
+        (or :meth:`rollback`) so database changes are all-or-nothing.
+        """
+        for entry in entries:
+            run_id = entry["run_id"]
+            self.conn.execute(
+                "INSERT OR REPLACE INTO timeline_runs("
+                "run_id, seed, started_at, finished_at, status, checks_total, "
+                "broken_total, new_broken_total, fixed_total, archived_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    entry["seed"],
+                    entry["started_at"],
+                    entry.get("finished_at"),
+                    entry["status"],
+                    entry["checks_total"],
+                    entry["broken_total"],
+                    entry["new_broken_total"],
+                    entry["fixed_total"],
+                    entry["archived_at"],
+                ),
+            )
+            self.conn.execute(
+                "DELETE FROM timeline_broken WHERE run_id = ?", (run_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM timeline_fixed WHERE run_id = ?", (run_id,)
+            )
+            for row in entry["broken"]:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO timeline_broken("
+                    "run_id, target_url, source_url, status_code, error, is_new) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        row["target_url"],
+                        row["source_url"],
+                        row.get("status_code"),
+                        row.get("error"),
+                        int(bool(row.get("is_new", False))),
+                    ),
+                )
+            for row in entry["fixed"]:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO timeline_fixed("
+                    "run_id, target_url, source_url) VALUES (?, ?, ?)",
+                    (run_id, row["target_url"], row["source_url"]),
+                )
+        for run_id in run_ids:
+            self.conn.execute("DELETE FROM pages WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM links WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM checks WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
+    def list_timeline_runs(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM timeline_runs ORDER BY run_id DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_all_run_records(self) -> list[dict]:
+        """Live and archived run metadata ordered oldest first.
+
+        Archived runs are those whose detail rows were removed but whose
+        timeline record remains.
+        """
+        records: list[dict] = []
+        live_ids: set[int] = set()
+        for row in self.conn.execute("SELECT * FROM runs ORDER BY id").fetchall():
+            data = self._decode_run(row)
+            live_ids.add(int(data["id"]))
+            records.append(
+                {
+                    "run_id": int(data["id"]),
+                    "seed": data["seed"],
+                    "started_at": data["started_at"],
+                    "finished_at": data.get("finished_at"),
+                    "status": data["status"],
+                    "checks_total": self.run_detail_counts(int(data["id"]))["checks"],
+                    "broken_total": len(self.broken_urls_for_run(int(data["id"]))),
+                    "archived": False,
+                }
+            )
+        for row in self.conn.execute(
+            "SELECT * FROM timeline_runs ORDER BY run_id"
+        ).fetchall():
+            data = dict(row)
+            if int(data["run_id"]) in live_ids:
+                continue
+            records.append(
+                {
+                    "run_id": int(data["run_id"]),
+                    "seed": data["seed"],
+                    "started_at": data["started_at"],
+                    "finished_at": data.get("finished_at"),
+                    "status": data["status"],
+                    "checks_total": int(data["checks_total"]),
+                    "broken_total": int(data["broken_total"]),
+                    "archived": True,
+                }
+            )
+        records.sort(key=lambda item: item["run_id"])
+        return records
+
+    def get_timeline_run(self, run_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM timeline_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_timeline_broken(
+        self, run_id: int | None = None, target_url: str | None = None,
+        source_url: str | None = None,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if target_url is not None:
+            clauses.append("target_url = ?")
+            params.append(target_url)
+        if source_url is not None:
+            clauses.append("source_url = ?")
+            params.append(source_url)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM timeline_broken{where} ORDER BY run_id, target_url",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_timeline_fixed(
+        self, run_id: int | None = None, target_url: str | None = None,
+        source_url: str | None = None,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if target_url is not None:
+            clauses.append("target_url = ?")
+            params.append(target_url)
+        if source_url is not None:
+            clauses.append("source_url = ?")
+            params.append(source_url)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM timeline_fixed{where} ORDER BY run_id, target_url",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def broken_urls_for_run(self, run_id: int) -> set[str]:
+        """Distinct broken target URLs for a live or archived run."""
+        return {row["target_url"] for row in self.broken_records_for_run(run_id)}
+
