@@ -13,7 +13,51 @@
   <div class="card"><span>Anchor failures</span><b>{{ summary.anchor_failures }}</b></div>
   <div class="card"><span>Orphans</span><b>{{ summary.orphan }}</b></div>
   <div class="card"><span>Dead ends</span><b>{{ summary.dead_ends }}</b></div>
+  {% if failure_distribution and failure_distribution.skipped_budget %}
+  <div class="card"><span>Skipped (budget)</span><b class="bad">{{ failure_distribution.skipped_budget }}</b></div>
+  {% endif %}
 </div>
+
+{% if failure_distribution and (failure_distribution.by_target or failure_distribution.by_code) %}
+<h2>Retry budget and failure distribution</h2>
+{% set budget = failure_distribution.budget %}
+<p class="muted">
+  Attempts <b>{{ budget.used }}</b>{% if budget.limit is not none %} / {{ budget.limit }}{% endif %}
+  · retries {{ failure_distribution.total_retries }}
+  · budget-exhausted targets {{ failure_distribution.skipped_budget }}
+  {% if budget.exhausted %}<b class="bad">· run truncated by budget</b>{% endif %}
+</p>
+{% if failure_distribution.by_code %}
+<h3>By failure code</h3>
+<table>
+  <thead><tr><th>Code / reason</th><th>Targets</th></tr></thead>
+  <tbody>
+  {% for code, count in failure_distribution.by_code.items() %}
+    <tr><td><code>{{ code }}</code></td><td>{{ count }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if failure_distribution.by_target %}
+<h3>By target</h3>
+<table>
+  <thead><tr><th>Target</th><th>Attempts</th><th>Retries</th><th>First failure</th><th>Final failure</th><th>Phase</th><th>Notes</th></tr></thead>
+  <tbody>
+  {% for item in failure_distribution.by_target %}
+    <tr>
+      <td><code>{{ item.target_url }}</code></td>
+      <td>{{ item.attempts }}</td>
+      <td>{{ item.retries }}</td>
+      <td>{{ item.first_failure_code if item.first_failure_code is not none else "—" }}</td>
+      <td>{{ item.final_failure_code if item.final_failure_code is not none else "—" }}</td>
+      <td>{{ item.phases | join(", ") }}</td>
+      <td class="bad">{% if item.budget_skipped %}skipped_budget {% endif %}{{ item.errors | join(", ") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
 
 <h2>Broken links</h2>
 {% if broken %}

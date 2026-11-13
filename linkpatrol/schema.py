@@ -51,7 +51,21 @@ CREATE TABLE IF NOT EXISTS baselines (
     run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS attempt_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    target_url TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    first_failure_code INTEGER,
+    final_failure_code INTEGER,
+    budget_skipped INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    UNIQUE(run_id, target_url, phase)
+);
 CREATE INDEX IF NOT EXISTS idx_pages_run ON pages(run_id);
 CREATE INDEX IF NOT EXISTS idx_links_run_source ON links(run_id, source_url);
 CREATE INDEX IF NOT EXISTS idx_checks_run_ok ON checks(run_id, ok);
+CREATE INDEX IF NOT EXISTS idx_attempt_details_run ON attempt_details(run_id);
 """

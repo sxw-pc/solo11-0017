@@ -6,10 +6,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
+from .budget import (
+    AttemptBudget,
+    AttemptDetail,
+    BUDGET_EXHAUSTED_ERROR,
+    detail_from_fetch,
+    is_significant,
+    merge_attempt_detail,
+)
 from .crawler import CrawlResult, PageRecord
 from .extractor import ExtractedLink, extract_links
 from .fetcher import FetchResult, Fetcher
-from .urlnorm import is_internal, normalize_url, strip_fragment
+from .urlnorm import is_internal, strip_fragment
 
 @dataclass
 class CheckRecord:
@@ -40,6 +48,8 @@ class CheckReport:
     checks: dict[str, CheckRecord] = field(default_factory=dict)
     skipped: int = 0
     requests: int = 0
+    skipped_budget: int = 0
+    attempt_details: list[AttemptDetail] = field(default_factory=list)
 
     @property
     def broken(self) -> list[CheckRecord]:
@@ -87,20 +97,27 @@ class _Probe:
 class Checker:
     """Check unique links while reusing crawled in-scope pages."""
 
-    def __init__(self, config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None) -> None:
+    def __init__(self, config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None,
+                 budget: AttemptBudget | None = None) -> None:
         self.config = config
         self.crawl = crawl
         limits = config["limits"]
         self.seed = config["seed"]
         self.allow_subdomains = config["scope"]["allow_subdomains"]
         self.check_external = config["external"]["check"]
+        self.budget = budget
         self.fetcher = fetcher or Fetcher(
             timeout_s=limits["timeout_s"],
             retries=limits["retries"],
             user_agent=config["robots"]["user_agent"],
             max_redirects=limits["max_redirects"],
+            budget=budget,
         )
+        if budget is not None and self.fetcher.budget is None:
+            self.fetcher.budget = budget
         self._base_cache: dict[str, _Probe] = {}
+        # Per-base telemetry accumulated across HEAD/GET/refresh probes.
+        self._telemetry: dict[str, AttemptDetail] = {}
 
     def run(self) -> CheckReport:
         report = CheckReport()
@@ -112,9 +129,43 @@ class Checker:
             if not self._should_check(link):
                 report.skipped += 1
                 continue
+            base = strip_fragment(link.target_url)
+            if self.budget is not None and self.budget.exhausted:
+                report.skipped_budget += 1
+                report.checks[link.target_url] = self._budget_record(link)
+                # One attribution row per unique base; fragment variants
+                # share the same skipped target.
+                if base not in self._telemetry:
+                    self._telemetry[base] = AttemptDetail(
+                        target_url=base,
+                        phase="check",
+                        attempts=0,
+                        budget_skipped=True,
+                        error=BUDGET_EXHAUSTED_ERROR,
+                    )
+                continue
             report.checks[link.target_url] = self._check_link(link)
         report.requests = len(self._base_cache)
+        report.attempt_details = self._collect_details()
         return report
+
+    def _budget_record(self, link: ExtractedLink) -> CheckRecord:
+        """A check that never ran because the run budget was used up."""
+        return CheckRecord(
+            url=link.target_url,
+            final_url=strip_fragment(link.target_url),
+            status_code=None,
+            redirect_chain=[],
+            anchor_ok=True,
+            ok=False,
+            error=BUDGET_EXHAUSTED_ERROR,
+            checked_at=_now(),
+            kind=link.kind,
+            scope=link.scope,
+        )
+
+    def _collect_details(self) -> list[AttemptDetail]:
+        return [detail for detail in self._telemetry.values() if is_significant(detail)]
 
     def _should_check(self, link: ExtractedLink) -> bool:
         if link.scope in {"mailto", "tel", "other"}:
@@ -180,13 +231,24 @@ class Checker:
         self._base_cache[base] = probe
         return probe
 
+    def _record_telemetry(self, base: str, result: FetchResult) -> None:
+        detail = detail_from_fetch(base, "check", result)
+        existing = self._telemetry.get(base)
+        if existing is None:
+            self._telemetry[base] = detail
+        else:
+            merge_attempt_detail(existing, detail)
+
     def _probe_network(self, base: str, force_get: bool = False) -> _Probe:
         if force_get:
             result = self.fetcher.fetch(base, method="GET", max_body_bytes=64 * 1024)
+            self._record_telemetry(base, result)
             return _Probe(result)
         head = self.fetcher.fetch(base, method="HEAD")
+        self._record_telemetry(base, head)
         if head.status_code in {405, 501}:
             fallback = self.fetcher.fetch(base, method="GET", max_body_bytes=64 * 1024)
+            self._record_telemetry(base, fallback)
             result = fallback
         else:
             result = head
@@ -205,6 +267,7 @@ class Checker:
             ).anchors
         return unquote(fragment) in probe.anchors
 
-def check_links(config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None) -> CheckReport:
+def check_links(config: dict, crawl: CrawlResult, fetcher: Fetcher | None = None,
+                budget: AttemptBudget | None = None) -> CheckReport:
     """Convenience wrapper used by the CLI and tests."""
-    return Checker(config, crawl, fetcher=fetcher).run()
+    return Checker(config, crawl, fetcher=fetcher, budget=budget).run()

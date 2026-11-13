@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
+from .budget import BUDGET_EXHAUSTED_ERROR, AttemptBudget
+
 REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -30,6 +32,11 @@ class FetchResult:
     redirect_chain: list[dict] = field(default_factory=list)
     error: str | None = None
     method: str = "GET"
+    # Run-budget and retry telemetry aggregated across every redirect hop.
+    attempts: int = 0
+    first_failure_code: int | None = None
+    final_failure_code: int | None = None
+    budget_skipped: bool = False
 
     @property
     def content_type(self) -> str:
@@ -71,6 +78,7 @@ class Fetcher:
         max_redirects: int = 5,
         max_body_bytes: int = 2 * 1024 * 1024,
         backoff_s: float = 0.02,
+        budget: AttemptBudget | None = None,
     ) -> None:
         self.timeout_s = timeout_s
         self.retries = max(0, retries)
@@ -78,6 +86,7 @@ class Fetcher:
         self.max_redirects = max(1, max_redirects)
         self.max_body_bytes = max_body_bytes
         self.backoff_s = backoff_s
+        self.budget = budget
         self.request_count = 0
 
     def fetch(
@@ -97,43 +106,88 @@ class Fetcher:
         current = url
         seen = {current}
         chain: list[dict] = []
+        telemetry = {"attempts": 0, "first_failure_code": None,
+                     "final_failure_code": None, "budget_skipped": False}
+
+        def finish(result: FetchResult) -> FetchResult:
+            result.requested_url = url
+            result.final_url = current
+            result.redirect_chain = chain
+            result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+            result.attempts = telemetry["attempts"]
+            result.first_failure_code = telemetry["first_failure_code"]
+            result.final_failure_code = telemetry["final_failure_code"]
+            result.budget_skipped = telemetry["budget_skipped"]
+            return result
+
         while True:
             result = self._request_with_retries(current, method, limit)
+            telemetry["attempts"] += result.attempts
+            telemetry["budget_skipped"] = telemetry["budget_skipped"] or result.budget_skipped
+            if result.first_failure_code is not None and (
+                telemetry["first_failure_code"] is None
+            ):
+                telemetry["first_failure_code"] = result.first_failure_code
+            if result.final_failure_code is not None:
+                telemetry["final_failure_code"] = result.final_failure_code
             if result.error:
-                result.requested_url = url
-                result.redirect_chain = chain
-                result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-                return result
+                return finish(result)
             location = _header(result.headers, "location")
             if result.status_code not in REDIRECT_CODES or not location:
-                result.requested_url = url
-                result.final_url = current
-                result.redirect_chain = chain
-                result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-                return result
+                return finish(result)
             next_url = urljoin(current, location)
             chain.append({"url": current, "status": result.status_code, "location": next_url})
             if next_url in seen:
-                result.requested_url = url
-                result.final_url = current
-                result.redirect_chain = chain
                 result.error = "redirect_loop"
-                result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-                return result
+                return finish(result)
             if len(chain) > self.max_redirects:
-                result.requested_url = url
-                result.final_url = current
-                result.redirect_chain = chain
                 result.error = "too_many_redirects"
-                result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-                return result
+                return finish(result)
             seen.add(next_url)
             current = next_url
 
+    def _budget_denied_result(self, url: str, method: str) -> FetchResult:
+        """Synthetic result for a call that never got a budget slot."""
+        return FetchResult(
+            requested_url=url,
+            final_url=url,
+            status_code=None,
+            error=BUDGET_EXHAUSTED_ERROR,
+            method=method,
+            attempts=0,
+            budget_skipped=True,
+        )
+
     def _request_with_retries(self, url: str, method: str, limit: int) -> FetchResult:
         last: FetchResult | None = None
+        first_failure_code: int | None = None
         for attempt in range(self.retries + 1):
+            if self.budget is not None and not self.budget.reserve():
+                if last is not None:
+                    last.budget_skipped = True
+                    last.error = last.error or BUDGET_EXHAUSTED_ERROR
+                    last.attempts = attempt
+                    last.first_failure_code = first_failure_code
+                    last.final_failure_code = last.status_code if last.error or (
+                        last.status_code is not None and last.status_code >= 400
+                    ) else None
+                    return last
+                denied = self._budget_denied_result(url, method)
+                return denied
             last = self._request_once(url, method, limit)
+            last.attempts = attempt + 1
+            failed = last.error is not None or (
+                last.status_code is not None and last.status_code >= 400
+            )
+            if failed:
+                if first_failure_code is None:
+                    first_failure_code = last.status_code
+                last.final_failure_code = last.status_code
+            else:
+                # A successful attempt clears the failure carried by an
+                # earlier retry; the first failure stays as flakiness evidence.
+                last.final_failure_code = None
+            last.first_failure_code = first_failure_code
             retryable = last.error is not None or (
                 last.status_code is not None and last.status_code >= 500
             )

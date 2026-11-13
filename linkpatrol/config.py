@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
         "delay_ms": 0,
         "concurrency": 1,
         "max_redirects": 5,
+        "max_attempts": None,
     },
     "robots": {
         "respect": True,
@@ -106,6 +107,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _as_int(limits, "concurrency", 1, 8)
     _as_int(limits, "max_redirects", 1, 20)
     _as_float(limits, "timeout_s", 0.05, 120.0)
+    if limits["max_attempts"] is not None:
+        _as_int(limits, "max_attempts", 1, 10_000_000)
 
     robots = config["robots"]
     if not isinstance(robots["respect"], bool):

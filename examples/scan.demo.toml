@@ -15,6 +15,10 @@ retries = 2
 delay_ms = 20
 concurrency = 1
 max_redirects = 5
+# Run-wide ceiling on total HTTP attempts. Leave unset to derive
+# max_pages * 2 * (retries + 1) + 10. Exhaustion marks remaining
+# targets as skipped_budget and ends the run as "budget_exhausted".
+max_attempts = 370
 
 [robots]
 respect = true

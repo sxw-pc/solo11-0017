@@ -58,12 +58,18 @@ SQLite 开启外键与 WAL。写入按行使用 savepoint；单条失败回滚�
 | `pages` | `id, run_id, url, depth, status_code, content_hash, duration_ms, error` | `(run_id, url)` |
 | `links` | `id, run_id, source_url, target_url, raw_href, kind, scope, line_no, anchor` | `(run_id, source_url, target_url, kind)` |
 | `checks` | `id, run_id, url, final_url, status_code, redirect_chain_json, anchor_ok, ok, error, checked_at` | `(run_id, url)` |
+| `attempt_details` | `id, run_id, target_url, phase, attempts, retry_count, first_failure_code, final_failure_code, budget_skipped, error` | `(run_id, target_url, phase)` |
 | `baselines` | `name, run_id, created_at` | 主键 `name` |
 
 `pages` 记录规范化 URL、深度、状态、响应体 SHA-256、耗时与错误；`links` 保留下
 载目标、原文、类型 (`page/asset/form`)、范围 (`internal/external/anchor/mailto/tel/other`)
 和行号；`checks` 保存最终 URL、重定向链、锚点结果和结论。每次 `scan` 创建新
 run，不覆盖历史。
+
+`attempt_details` 是 run 级重试预算与失败归因明细：只有发生过重试、失败或被预算
+截断的 target 才会落行，记录所属阶段 (`crawl`/`check`)、实际尝试次数、重试次数、
+首次/最终失败码（网络错误为 `NULL`）以及 `budget_skipped` 标记。旧版本数据库没有
+该表，打开时会自动补建；旧 run 没有明细时报告的失败分布降级为空结构，不会报错。
 
 ## 配置
 
@@ -81,6 +87,7 @@ TOML 配置在默认值基础上合并，未知键、类型错误或非法正则
 | `limits` | `delay_ms` | `0` | 请求间隔毫秒 |
 | `limits` | `concurrency` | `1` | 1–8；默认串行保证确定性 |
 | `limits` | `max_redirects` | `5` | 最大重定向跳数 |
+| `limits` | `max_attempts` | `null`（自动推导）| run 级总请求尝试上限；缺省为 `max_pages × 2 × (retries+1) + 10`，显式整数可覆写 |
 | `robots` | `respect` | `true` | 是否遵守 robots.txt |
 | `robots` | `user_agent` | `linkpatrol/0.1` | 请求 UA 与 robots 组匹配 |
 | `external` | `check` | `true` | 是否检查站外链接 |
@@ -159,6 +166,25 @@ seed 源站的 `/sitemap.xml`。`serve` 提供 `/`、`/runs/<id>`（按状态/�
 三类 JSON，并把最近一次摘要写入当前 run 的 `stats_json.last_diff`。忽略规则只在
 判定 `new_broken` 时生效。
 
+## Run 级重试预算与失败归因
+
+`retries` 只约束**单次请求**的指数退避次数；一个 run 里多个不稳定 target 叠加时
+总尝试次数仍可能失控。`max_attempts` 在其之上再加一层 run 级总预算，由 crawler
+与 checker 共享同一个线程安全计数器（并发下原子预留，绝不超支）：
+
+- 预算耗尽后，剩余 URL 不再发起请求，直接标记为 `skipped_budget`
+  （check 记录的 `error` 为 `budget_exhausted`，计入 broken），run 走干净的部分
+  完成路径并在可预期时间内结束。
+- `runs.status` 三态区分：`completed`（无预算截断且无抓取级错误）、
+  `partial`（完整跑完但存在抓取错误，如持续 5xx）、`budget_exhausted`
+  （预算截断）；异常中断仍为 `failed`。状态变化不改变 CLI 退出码语义，截断的
+  scan 依然返回 `0`。
+- `stats_json.budget` 记录 `limit/used/denied/remaining/exhausted`，
+  `stats_json.skipped_budget` 记录跳过数。
+- JSON 报告的 `failure_distribution` 输出按失败码（`404`/`500`/`network_error`/
+  `budget_exhausted`）和按 target 聚合的失败分布，HTML 报告在有明细时渲染
+  “Retry budget and failure distribution”区块；无明细的旧 run 降级为空。
+
 ## 快速上手
 
 ```bash
@@ -199,7 +225,10 @@ python -m pytest
 `127.0.0.1` 的连接和 DNS 查询；mock 站点用随机端口启动，测试结束回收。覆盖
 URL 规范化、五类标签提取、robots 优先级、重试/超时/重定向、深度与页数上限、
 robots 跳过、HEAD 回退、锚点、唯一约束与回滚、sitemap 递归、三类孤儿发现、基线
-分类、报告必填键、Flask 路由和完整 CLI 回归流程（退出码 2）。
+分类、报告必填键、Flask 路由和完整 CLI 回归流程（退出码 2）。重试预算覆盖
+并发原子计数不超支、预算耗尽后 `budget_exhausted` 截断与 `skipped_budget` 计数、
+按失败码/target 的失败分布与库内明细对账，以及旧库（无 `attempt_details` 表）
+生成报告不报错的降级路径。
 
 ```bash
 python -m pytest

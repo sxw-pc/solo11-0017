@@ -10,6 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from .budget import (
+    AttemptBudget,
+    AttemptDetail,
+    BUDGET_EXHAUSTED_ERROR,
+    detail_from_fetch,
+    is_significant,
+)
 from .config import ConfigError
 from .extractor import ExtractedLink, extract_links
 from .fetcher import FetchResult, Fetcher
@@ -57,6 +64,7 @@ class CrawlStats:
     excluded_by_scope: int = 0
     non_html: int = 0
     errors: int = 0
+    skipped_budget: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -67,6 +75,7 @@ class CrawlStats:
             "excluded_by_scope": self.excluded_by_scope,
             "non_html": self.non_html,
             "errors": self.errors,
+            "skipped_budget": self.skipped_budget,
         }
 
 @dataclass
@@ -74,6 +83,7 @@ class CrawlResult:
     seed: str
     pages: dict[str, PageRecord] = field(default_factory=dict)
     stats: CrawlStats = field(default_factory=CrawlStats)
+    attempt_details: list[AttemptDetail] = field(default_factory=list)
 
     def iter_links(self) -> Iterable[tuple[str, ExtractedLink]]:
         for page in self.pages.values():
@@ -84,7 +94,8 @@ class Crawler:
     """Polite, bounded BFS crawler for one site."""
 
     def __init__(self, config: dict, fetcher: Fetcher | None = None,
-                 robots_cache: RobotsCache | None = None) -> None:
+                 robots_cache: RobotsCache | None = None,
+                 budget: AttemptBudget | None = None) -> None:
         self.config = config
         limits = config["limits"]
         self.seed = normalize_url(config["seed"], drop_params=self.drop_params)
@@ -95,14 +106,19 @@ class Crawler:
         self.max_pages = limits["max_pages"]
         self.concurrency = limits["concurrency"]
         self.delay_s = limits["delay_ms"] / 1000.0
+        self.budget = budget
         self.fetcher = fetcher or Fetcher(
             timeout_s=limits["timeout_s"],
             retries=limits["retries"],
             user_agent=config["robots"]["user_agent"],
             max_redirects=limits["max_redirects"],
+            budget=budget,
         )
         if not isinstance(self.fetcher, Fetcher):
             raise ConfigError("fetcher must be a Fetcher instance")
+        if budget is not None and self.fetcher.budget is None:
+            # An injected fetcher still has to share the run budget.
+            self.fetcher.budget = budget
         self.robots = robots_cache or RobotsCache(
             self.fetcher,
             respect=config["robots"]["respect"],
@@ -128,6 +144,9 @@ class Crawler:
                     result.stats.skipped_by_limits += len(queue)
                     queue.clear()
                     break
+                if self.budget is not None and self.budget.exhausted:
+                    self._drain_budget(queue, result)
+                    break
                 batch: list[tuple[str, int]] = []
                 while queue and len(batch) < self.concurrency:
                     if len(result.pages) + len(batch) >= self.max_pages:
@@ -150,7 +169,25 @@ class Crawler:
                     fetched = [self._fetch(url) for url, _ in prepared]
                 for (url, depth), fetch in zip(prepared, fetched):
                     self._record(url, depth, fetch, result, seen, queue)
+                if self.budget is not None and self.budget.exhausted and queue:
+                    self._drain_budget(queue, result)
+                    break
         return result
+
+    def _drain_budget(self, queue: deque[tuple[str, int]], result: CrawlResult) -> None:
+        """Clean partial-completion path: mark every queued target as skipped."""
+        for url, _depth in queue:
+            result.stats.skipped_budget += 1
+            result.attempt_details.append(
+                AttemptDetail(
+                    target_url=url,
+                    phase="crawl",
+                    attempts=0,
+                    budget_skipped=True,
+                    error=BUDGET_EXHAUSTED_ERROR,
+                )
+            )
+        queue.clear()
 
     def _executor(self):
         if self.concurrency <= 1:
@@ -191,6 +228,11 @@ class Crawler:
             result.stats.non_html += 1
         if fetch.error:
             result.stats.errors += 1
+        if fetch.budget_skipped:
+            result.stats.skipped_budget += 1
+        detail = detail_from_fetch(url, "crawl", fetch)
+        if is_significant(detail):
+            result.attempt_details.append(detail)
         digest = hashlib.sha256(fetch.body).hexdigest()
         page = PageRecord(
             url=url,
@@ -236,6 +278,7 @@ class _NullExecutor:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-def crawl_site(config: dict, fetcher: Fetcher | None = None) -> CrawlResult:
+def crawl_site(config: dict, fetcher: Fetcher | None = None,
+               budget: AttemptBudget | None = None) -> CrawlResult:
     """Convenience wrapper used by the CLI and tests."""
-    return Crawler(config, fetcher=fetcher).run()
+    return Crawler(config, fetcher=fetcher, budget=budget).run()

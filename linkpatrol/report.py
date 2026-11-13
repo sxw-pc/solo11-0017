@@ -12,6 +12,92 @@ from .store import Store
 
 TEMPLATE_DIR = Path(__file__).with_name("templates")
 
+def _failure_key(detail: dict) -> str:
+    """Bucket label used in the by-code distribution."""
+    code = detail.get("final_failure_code")
+    if code is not None:
+        return str(code)
+    if detail.get("budget_skipped"):
+        return "budget_exhausted"
+    if detail.get("error"):
+        return "network_error"
+    return "ok"
+
+
+def build_failure_distribution(store: Store, run_id: int) -> dict:
+    """Aggregate run-level retry/failure attribution by code and by target.
+
+    Databases created before the attempt_details table existed simply have no
+    rows, in which case every aggregate degrades to an empty structure so
+    reports on legacy runs never crash.
+    """
+    details = store.get_attempt_details(run_id)
+    by_code: dict[str, int] = {}
+    targets: dict[str, dict] = {}
+    skipped_budget = 0
+    total_retries = 0
+    for detail in details:
+        if detail.get("budget_skipped"):
+            skipped_budget += 1
+        total_retries += int(detail.get("retry_count") or 0)
+        key = _failure_key(detail)
+        # Only rows that actually failed or were cut off contribute to the
+        # code distribution; healthy retried-and-recovered rows stay out.
+        if (
+            detail.get("final_failure_code") is not None
+            or detail.get("budget_skipped")
+            or (detail.get("error") and not detail.get("budget_skipped"))
+        ):
+            by_code[key] = by_code.get(key, 0) + 1
+        entry = targets.setdefault(
+            detail["target_url"],
+            {
+                "target_url": detail["target_url"],
+                "attempts": 0,
+                "retries": 0,
+                "first_failure_code": None,
+                "final_failure_code": None,
+                "budget_skipped": False,
+                "phases": [],
+                "errors": [],
+            },
+        )
+        entry["attempts"] += int(detail.get("attempts") or 0)
+        entry["retries"] += int(detail.get("retry_count") or 0)
+        entry["budget_skipped"] = entry["budget_skipped"] or bool(
+            detail.get("budget_skipped")
+        )
+        if (
+            detail.get("first_failure_code") is not None
+            and entry["first_failure_code"] is None
+        ):
+            entry["first_failure_code"] = detail["first_failure_code"]
+        if detail.get("final_failure_code") is not None:
+            entry["final_failure_code"] = detail["final_failure_code"]
+        if detail.get("phase") and detail["phase"] not in entry["phases"]:
+            entry["phases"].append(detail["phase"])
+        if detail.get("error") and detail["error"] not in entry["errors"]:
+            entry["errors"].append(detail["error"])
+    by_target = sorted(
+        targets.values(), key=lambda item: (-item["attempts"], item["target_url"])
+    )
+    run = store.get_run(run_id) or {}
+    budget = (run.get("stats") or {}).get("budget") or {
+        "limit": None,
+        "used": 0,
+        "denied": 0,
+        "remaining": None,
+        "exhausted": False,
+    }
+    return {
+        "by_code": dict(sorted(by_code.items())),
+        "by_target": by_target,
+        "budget": budget,
+        "total_retries": total_retries,
+        "skipped_budget": skipped_budget,
+    }
+
+
 def build_report(store: Store, run_id: int) -> dict:
     """Assemble report data from one completed run."""
     run = store.get_run(run_id)
@@ -82,6 +168,7 @@ def build_report(store: Store, run_id: int) -> dict:
         "unlisted": findings.get("unlisted", []),
     }
     warnings = [check for check in checks.values() if check["ok"] and check["error"]]
+    failure_distribution = build_failure_distribution(store, run_id)
     data = {
         "run": {
             "id": run["id"],
@@ -103,6 +190,8 @@ def build_report(store: Store, run_id: int) -> dict:
             "orphan": len(orphan_report["orphan"]),
             "unlisted": len(orphan_report["unlisted"]),
             "dead_ends": len(dead_ends),
+            "skipped_budget": failure_distribution["skipped_budget"],
+            "total_retries": failure_distribution["total_retries"],
             "crawl": run["stats"].get("crawl", {}),
         },
         "broken": broken,
@@ -110,6 +199,7 @@ def build_report(store: Store, run_id: int) -> dict:
         "anchors": anchors,
         "orphans": orphan_report,
         "dead_ends": dead_ends,
+        "failure_distribution": failure_distribution,
     }
     return data
 

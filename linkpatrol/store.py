@@ -163,6 +163,40 @@ class Store:
         for check in checks:
             self.insert_check(run_id, check)
 
+    def insert_attempt_detail(self, run_id: int, detail: Any) -> bool:
+        values = detail if isinstance(detail, dict) else detail.__dict__
+        return self._write(
+            "INSERT INTO attempt_details(run_id, target_url, phase, attempts, "
+            "retry_count, first_failure_code, final_failure_code, budget_skipped, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                values["target_url"],
+                values["phase"],
+                int(values.get("attempts", 0)),
+                int(values.get("retry_count", 0)),
+                values.get("first_failure_code"),
+                values.get("final_failure_code"),
+                int(bool(values.get("budget_skipped", False))),
+                values.get("error"),
+            ),
+        )
+
+    def save_attempt_details(self, run_id: int, details: Iterable[Any]) -> None:
+        for detail in details:
+            self.insert_attempt_detail(run_id, detail)
+
+    def get_attempt_details(self, run_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM attempt_details WHERE run_id = ? "
+            "ORDER BY attempts DESC, target_url, phase",
+            (run_id,),
+        ).fetchall()
+        details = [dict(row) for row in rows]
+        for row in details:
+            row["budget_skipped"] = bool(row["budget_skipped"])
+        return details
+
     def get_run(self, run_id: int) -> dict | None:
         row = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return self._decode_run(row) if row else None

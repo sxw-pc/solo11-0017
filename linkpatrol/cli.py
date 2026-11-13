@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .baseline import BaselineError, IgnoreRules, diff_runs, exit_code_for, summary_text
+from .budget import AttemptBudget, resolve_attempt_limit
 from .checker import check_links
 from .config import ConfigError, load_config
 from .crawler import crawl_site
@@ -104,18 +105,22 @@ def _scan(args) -> int:
     limits = config["limits"]
     store = Store(config["output"]["database"])
     run_id = store.create_run(config["seed"], config)
+    budget = AttemptBudget(resolve_attempt_limit(config))
     fetcher = Fetcher(
         timeout_s=limits["timeout_s"],
         retries=limits["retries"],
         user_agent=config["robots"]["user_agent"],
         max_redirects=limits["max_redirects"],
+        budget=budget,
     )
     try:
-        crawl = crawl_site(config, fetcher=fetcher)
+        crawl = crawl_site(config, fetcher=fetcher, budget=budget)
         store.save_crawl(run_id, crawl.pages.values())
         store.save_links(run_id, crawl.iter_links())
-        checks = check_links(config, crawl, fetcher=fetcher)
+        checks = check_links(config, crawl, fetcher=fetcher, budget=budget)
         store.save_checks(run_id, checks.checks.values())
+        store.save_attempt_details(run_id, crawl.attempt_details)
+        store.save_attempt_details(run_id, checks.attempt_details)
         entries = [
             {"url": page.url, "lastmod": None}
             for page in crawl.pages.values()
@@ -130,6 +135,7 @@ def _scan(args) -> int:
         else:
             findings = compute_findings(listed, crawl.pages.values())
         stats = crawl.stats.as_dict()
+        skipped_budget = crawl.stats.skipped_budget + checks.skipped_budget
         stats.update(
             {
                 "crawl": crawl.stats.as_dict(),
@@ -139,13 +145,24 @@ def _scan(args) -> int:
                 "findings": findings,
                 "write_errors": len(store.write_errors),
                 "sitemap_urls": len(entries),
+                "skipped_budget": skipped_budget,
+                "budget": budget.snapshot(),
             }
         )
-        store.finish_run(run_id, "completed", stats)
+        if budget.exhausted or skipped_budget:
+            status = "budget_exhausted"
+        elif crawl.stats.errors:
+            status = "partial"
+        else:
+            status = "completed"
+        store.finish_run(run_id, status, stats)
         json_path, html_path = write_reports(store, run_id, config["output"]["dir"])
         print(
-            f"run {run_id}: pages={len(crawl.pages)} checks={len(checks.checks)} "
-            f"broken={len(checks.broken)} reports={json_path},{html_path}"
+            f"run {run_id}: status={status} pages={len(crawl.pages)} "
+            f"checks={len(checks.checks)} broken={len(checks.broken)} "
+            f"skipped_budget={skipped_budget} "
+            f"attempts={budget.used}/{budget.limit} "
+            f"reports={json_path},{html_path}"
         )
         return 0
     except Exception:
