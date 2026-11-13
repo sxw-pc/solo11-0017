@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 from typing import Iterable
 
 from .crawler import PageRecord
-from .urlnorm import normalize_url, strip_fragment
+from .urlnorm import in_path_scope, normalize_url, strip_fragment
 
 def load_url_list(path: str | Path) -> list[str]:
     """Load one URL per line, ignoring blanks and ``#`` comments."""
