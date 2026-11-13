@@ -8,3 +8,7 @@ __pycache__/
 .benchmarks/
 .env
 dist/
+out/
+reports/
+.coverage
+coverage.xml

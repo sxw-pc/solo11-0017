@@ -42,6 +42,8 @@ SQLite，生成 JSON/HTML 报告与 sitemap.xml，并支持把“新增断链”
        |       |
        v       v
  sitemap.py  server.py (read-only Flask UI)
+
+ trend: trends.py (只读 mode=ro 打开 scan 库) -> trendstore.py (独立 out/trends.db)
 ```
 
 设计取舍：抓取、HTML 解析、配置、存储与 CLI **刻意只使用标准库**；Flask 仅用于
@@ -159,6 +161,47 @@ seed 源站的 `/sitemap.xml`。`serve` 提供 `/`、`/runs/<id>`（按状态/�
 三类 JSON，并把最近一次摘要写入当前 run 的 `stats_json.last_diff`。忽略规则只在
 判定 `new_broken` 时生效。
 
+## 巡检趋势（离线多 run 分析）
+
+`trend` 子命令只读分析同一个 seed 的多个历史 run，输出每个规范化 URL（及锚点）
+在时间轴上的状态码、重定向链长度、锚点结论、外部链接失败数走势，并判定
+**持续恶化 `deteriorating`** 与 **波动性抖动 `flapping`**。完整指标与身份对齐
+定义见 [`docs/trends.md`](docs/trends.md)。
+
+```bash
+python -m linkpatrol trend generate --db out/linkpatrol.db \
+  --trend-db out/trends.db --seed http://127.0.0.1:5001/ \
+  --since 2026-01-01T00:00:00+00:00 --min-occurrences 2 \
+  [--runs 1,2,3] [--include-incomplete] [--json-out out/trend.json]
+python -m linkpatrol trend list --trend-db out/trends.db
+python -m linkpatrol trend show --trend-db out/trends.db --report 1
+```
+
+关键设计：
+
+- **只读**：scan 库以 SQLite `mode=ro` 打开，趋势产物落在独立的 `out/trends.db`
+  （`trend_reports/trend_entities/trend_series/trend_events` 四张表），不改任何
+  scan 写入路径。
+- **两级身份，对齐失败即降级**：精确键（path+query）与结构键（path）。`drop_params`
+  变更导致的 query 身份改写在结构键下安全合并并记录 `aliases`；同一 run 内多个
+  query 变体共存则标记 `ambiguous`、拒绝合并，绝不猜测身份。
+- **覆盖率语义**：截断（`max_pages`）或中断 run 中未访问的结构路径记为
+  `unscanned`，完整 run 中确实不存在才记 `missing`；只有后者会产生
+  `disappeared`，避免把「没扫到」误判成「链接消失」。
+- **中断 run**：默认排除，`--include-incomplete` 纳入并标注，其缺口按
+  `unscanned` 处理。
+- **阈值**：`--min-occurrences` 以下的实体只入明细（`below_threshold`），
+  不参与恶化判定。
+- **可重复**：报告按除时间戳外的全部内容算 SHA-256 `content_hash` 并建唯一
+  约束，同批 run 重复生成只刷新时间戳、结论不变。
+
+内置演示脚本会跑 4 次可对比的 scan（健康 → 500 → 持续 404 → 改 normalize 且
+截断），故障经 `LINKPATROL_DEMO_FAULTS` 环境变量注入：
+
+```bash
+.venv/bin/python scripts/demo_trends.py --keep-db
+```
+
 ## 快速上手
 
 ```bash
@@ -199,7 +242,9 @@ python -m pytest
 `127.0.0.1` 的连接和 DNS 查询；mock 站点用随机端口启动，测试结束回收。覆盖
 URL 规范化、五类标签提取、robots 优先级、重试/超时/重定向、深度与页数上限、
 robots 跳过、HEAD 回退、锚点、唯一约束与回滚、sitemap 递归、三类孤儿发现、基线
-分类、报告必填键、Flask 路由和完整 CLI 回归流程（退出码 2）。
+分类、报告必填键、Flask 路由和完整 CLI 回归流程（退出码 2），以及趋势能力的
+跨 run 身份对齐、歧义降级、截断/中断覆盖率语义、恶化/抖动分类、锚点事件、
+只读约束与产物幂等。
 
 ```bash
 python -m pytest

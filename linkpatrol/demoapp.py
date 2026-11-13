@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from collections import defaultdict
 from html import escape
@@ -13,6 +15,26 @@ body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0
 a{color:#0b63ce}nav a{margin-right:1rem}.box{border:1px solid #d6dde5;padding:1rem;border-radius:8px}
 footer{margin-top:2rem;color:#66788a;font-size:.9rem}
 """
+
+# Environment variable pointing at a JSON file used to inject deterministic
+# faults for the offline trend demo, e.g. {"/docs": 500, "/about": 404}.
+# Absent or empty -> the demo site behaves exactly as before.
+FAULT_ENV = "LINKPATROL_DEMO_FAULTS"
+
+
+def _load_faults() -> dict[str, int]:
+    raw = os.environ.get(FAULT_ENV, "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return {
+        str(path): int(code)
+        for path, code in data.items()
+        if isinstance(code, int) and 400 <= code < 600
+    }
 
 def _page(title: str, body: str) -> str:
     return f"""<!doctype html>
@@ -31,6 +53,19 @@ def create_demo_app() -> Flask:
     counters: dict[str, int] = defaultdict(int)
     app.config["DEMO_COUNTERS"] = counters
 
+    @app.before_request
+    def _inject_fault():
+        faults = _load_faults()
+        code = faults.get(request.path)
+        if code is None:
+            return None
+        if 500 <= code < 600:
+            return _page(
+                "Injected error",
+                f"<p>Injected {code} fault for {escape(request.path)}.</p>",
+            ), code
+        abort(code)
+
     @app.get("/")
     def home():
         body = """
@@ -42,6 +77,9 @@ def create_demo_app() -> Flask:
 <a href="/hop-1">A three-hop redirect</a> · <a href="/loop-a">A redirect loop</a></p>
 <p><a href="/flaky">An initially unstable page</a> · <a href="/slow">A slow page</a> ·
 <a href="/private/secret">A robots-disallowed page</a></p>
+<p>Campaign variants (query-only, merged by normalize.drop_params):
+<a href="/landing?campaign=home">landing A</a> ·
+<a href="/docs?campaign=footer">docs campaign</a></p>
 <p><img src="/assets/missing.png" alt="missing"> <img src="/assets/logo.png" alt="logo"></p>
 <form action="/search" method="get"><input name="q"><button>Search</button></form>
 <p><a href="mailto:maintainer@127.0.0.1">Email</a> ·
