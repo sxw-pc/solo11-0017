@@ -13,8 +13,36 @@ from .schema import SCHEMA
 class BaselineExistsError(ValueError):
     """Raised when setting an existing baseline without force."""
 
+# Additive migrations applied to databases created before the link graph
+# existed.  Historical rows keep their values; new columns get defaults.
+_LINKS_MIGRATIONS = (
+    ("sources", "ALTER TABLE links ADD COLUMN sources INTEGER NOT NULL DEFAULT 1"),
+    ("sources_json",
+     "ALTER TABLE links ADD COLUMN sources_json TEXT NOT NULL DEFAULT '[]'"),
+)
+
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def _decode_sources_json(raw: Any, fallback: dict) -> list[dict]:
+    """Decode the per-edge source list, synthesising one for legacy rows."""
+    try:
+        sources = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        sources = []
+    if not isinstance(sources, list):
+        sources = []
+    sources = [item for item in sources if isinstance(item, dict) and item.get("source_url")]
+    if sources:
+        return sources
+    return [
+        {
+            "source_url": fallback["source_url"],
+            "raw_href": fallback.get("raw_href", ""),
+            "line_no": fallback.get("line_no", 0),
+            "anchor": fallback.get("anchor", ""),
+        }
+    ]
 
 class Store:
     """A small repository around one SQLite database file."""
@@ -29,8 +57,18 @@ class Store:
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate_links()
         self.conn.commit()
         self.write_errors: list[str] = []
+
+    def _migrate_links(self) -> None:
+        """Add link-graph columns to pre-graph databases (structure kept)."""
+        columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(links)")
+        }
+        for name, sql in _LINKS_MIGRATIONS:
+            if name not in columns:
+                self.conn.execute(sql)
 
     def close(self) -> None:
         self.conn.close()
@@ -116,9 +154,23 @@ class Store:
 
     def insert_link(self, run_id: int, source_url: str, link: Any) -> bool:
         values = link if isinstance(link, dict) else link.__dict__
+        source_list = values.get("source_list")
+        sources_json = values.get("sources_json")
+        if sources_json is None:
+            sources_json = json.dumps(source_list or [], sort_keys=True)
+        sources = values.get("sources")
+        if not sources:
+            if source_list:
+                sources = len(source_list)
+            else:
+                try:
+                    sources = max(1, len(json.loads(sources_json)))
+                except ValueError:
+                    sources = 1
         return self._write(
             "INSERT INTO links(run_id, source_url, target_url, raw_href, kind, "
-            "scope, line_no, anchor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "scope, line_no, anchor, sources, sources_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 source_url,
@@ -128,6 +180,8 @@ class Store:
                 values["scope"],
                 values["line_no"],
                 values.get("anchor", ""),
+                int(sources),
+                sources_json,
             ),
         )
 
@@ -158,6 +212,29 @@ class Store:
     def save_links(self, run_id: int, pairs: Iterable[tuple[str, Any]]) -> None:
         for source_url, link in pairs:
             self.insert_link(run_id, source_url, link)
+
+    def save_link_graph(self, run_id: int, graph: Any) -> None:
+        """Persist one deduplicated row per ``(target_url, kind)`` edge.
+
+        Each row keeps the first source as the representative record and the
+        full source list in ``sources_json``.  Rows are written independently
+        through the savepoint path, so one failing edge never aborts the rest.
+        """
+        for edge in graph.edges():
+            self.insert_link(
+                run_id,
+                edge.source_url,
+                {
+                    "target_url": edge.target_url,
+                    "raw_href": edge.raw_href,
+                    "kind": edge.kind,
+                    "scope": edge.scope,
+                    "line_no": edge.line_no,
+                    "anchor": edge.anchor,
+                    "sources": edge.source_count,
+                    "source_list": [source.as_dict() for source in edge.sources],
+                },
+            )
 
     def save_checks(self, run_id: int, checks: Iterable[Any]) -> None:
         for check in checks:
@@ -210,7 +287,30 @@ class Store:
             "ORDER BY source_url, line_no, id",
             params,
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._decode_link(row) for row in rows]
+
+    @staticmethod
+    def _decode_link(row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["source_list"] = _decode_sources_json(
+            data.get("sources_json"), fallback=data
+        )
+        stored = data.get("sources")
+        data["sources"] = int(stored) if stored else len(data["source_list"])
+        return data
+
+    def inlink_counts(self, run_id: int) -> dict[str, int]:
+        """Total source references per target URL for one run.
+
+        Historical rows carry the default ``sources = 1``, so the sum matches
+        the old per-row count for pre-graph databases.
+        """
+        rows = self.conn.execute(
+            "SELECT target_url, SUM(sources) AS total FROM links "
+            "WHERE run_id = ? GROUP BY target_url",
+            (run_id,),
+        ).fetchall()
+        return {row["target_url"]: int(row["total"] or 0) for row in rows}
 
     def get_checks(self, run_id: int) -> list[dict]:
         rows = self.conn.execute(
@@ -230,15 +330,38 @@ class Store:
         return data
 
     def broken_identities(self, run_id: int) -> list[dict]:
+        """Broken ``(source_url, target_url)`` pairs for baseline diffing.
+
+        Deduplicated edges are expanded through their stored source list so
+        no source page is lost; legacy rows contribute their own source_url.
+        """
         rows = self.conn.execute(
-            "SELECT DISTINCT l.source_url, l.target_url, c.status_code, c.error, "
-            "c.anchor_ok FROM links l JOIN checks c "
+            "SELECT l.source_url, l.target_url, l.sources_json, "
+            "c.status_code, c.error, c.anchor_ok FROM links l JOIN checks c "
             "ON c.run_id = l.run_id AND c.url = l.target_url "
-            "WHERE l.run_id = ? AND c.ok = 0 "
-            "ORDER BY l.source_url, l.target_url",
+            "WHERE l.run_id = ? AND c.ok = 0",
             (run_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        seen: set[tuple[str, str]] = set()
+        broken: list[dict] = []
+        for row in rows:
+            data = dict(row)
+            for source in _decode_sources_json(data.get("sources_json"), data):
+                key = (source["source_url"], data["target_url"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                broken.append(
+                    {
+                        "source_url": source["source_url"],
+                        "target_url": data["target_url"],
+                        "status_code": data["status_code"],
+                        "error": data["error"],
+                        "anchor_ok": data["anchor_ok"],
+                    }
+                )
+        broken.sort(key=lambda item: (item["source_url"], item["target_url"]))
+        return broken
 
     def redirect_records(self, run_id: int) -> list[dict]:
         rows = self.conn.execute(

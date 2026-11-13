@@ -13,7 +13,23 @@
   <div class="card"><span>Anchor failures</span><b>{{ summary.anchor_failures }}</b></div>
   <div class="card"><span>Orphans</span><b>{{ summary.orphan }}</b></div>
   <div class="card"><span>Dead ends</span><b>{{ summary.dead_ends }}</b></div>
+  <div class="card"><span>Unique links</span><b>{{ summary.links }}</b></div>
+  <div class="card"><span>Link refs</span><b>{{ summary.link_refs }}</b></div>
 </div>
+
+<h2>Most linked targets</h2>
+{% if inlinks %}
+<table>
+  <thead><tr><th>Target</th><th>Incoming</th></tr></thead>
+  <tbody>
+  {% for item in inlinks[:15] %}
+    <tr><td><code>{{ item.target_url }}</code></td><td>{{ item.sources }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No links recorded.</div>
+{% endif %}
 
 <h2>Broken links</h2>
 {% if broken %}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Iterable
 from urllib.parse import unquote
 
 from .crawler import CrawlResult, PageRecord
@@ -105,7 +106,7 @@ class Checker:
     def run(self) -> CheckReport:
         report = CheckReport()
         seen: set[str] = set()
-        for _source, link in self.crawl.iter_links():
+        for link in self._candidates():
             if link.target_url in seen:
                 continue
             seen.add(link.target_url)
@@ -115,6 +116,19 @@ class Checker:
             report.checks[link.target_url] = self._check_link(link)
         report.requests = len(self._base_cache)
         return report
+
+    def _candidates(self) -> Iterable:
+        """Unique check candidates from the crawl's link graph.
+
+        The graph already deduplicates ``(target_url, kind)`` across source
+        pages, so each target is probed at most once.  Crawl results built
+        without a graph (older callers, hand-built fixtures) fall back to
+        scanning page links directly.
+        """
+        graph = getattr(self.crawl, "link_graph", None)
+        if graph is not None and len(graph):
+            return graph.edges()
+        return (link for _source, link in self.crawl.iter_links())
 
     def _should_check(self, link: ExtractedLink) -> bool:
         if link.scope in {"mailto", "tel", "other"}:

@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS links (
     scope TEXT NOT NULL,
     line_no INTEGER NOT NULL,
     anchor TEXT NOT NULL DEFAULT '',
+    sources INTEGER NOT NULL DEFAULT 1,
+    sources_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(run_id, source_url, target_url, kind)
 );
 CREATE TABLE IF NOT EXISTS checks (
@@ -53,5 +55,6 @@ CREATE TABLE IF NOT EXISTS baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_pages_run ON pages(run_id);
 CREATE INDEX IF NOT EXISTS idx_links_run_source ON links(run_id, source_url);
+CREATE INDEX IF NOT EXISTS idx_links_run_target ON links(run_id, target_url);
 CREATE INDEX IF NOT EXISTS idx_checks_run_ok ON checks(run_id, ok);
 """

@@ -11,6 +11,7 @@ from werkzeug.serving import make_server
 
 from linkpatrol.config import default_config
 from linkpatrol.store import Store
+from tests.densesite import create_dense_app
 from tests.mocksite.app import create_mock_app
 from tests.mocksite.extapp import create_ext_app
 
@@ -71,6 +72,17 @@ def mocksite(ext_site):
     site = _start(create_mock_app(ext_base=ext_site.base_url))
     yield site
     site.stop()
+
+@pytest.fixture(scope="session")
+def dense_site(ext_site):
+    site = _start(create_dense_app(ext_base=ext_site.base_url))
+    yield site
+    site.stop()
+
+@pytest.fixture
+def reset_dense(dense_site):
+    dense_site.app.config["BROKEN_SHARED"].clear()
+    return dense_site
 
 @pytest.fixture
 def reset_mock(mocksite):

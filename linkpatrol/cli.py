@@ -113,7 +113,7 @@ def _scan(args) -> int:
     try:
         crawl = crawl_site(config, fetcher=fetcher)
         store.save_crawl(run_id, crawl.pages.values())
-        store.save_links(run_id, crawl.iter_links())
+        store.save_link_graph(run_id, crawl.link_graph)
         checks = check_links(config, crawl, fetcher=fetcher)
         store.save_checks(run_id, checks.checks.values())
         entries = [
@@ -133,6 +133,8 @@ def _scan(args) -> int:
         stats.update(
             {
                 "crawl": crawl.stats.as_dict(),
+                "links": len(crawl.link_graph),
+                "link_refs": crawl.link_graph.reference_count,
                 "checks": len(checks.checks),
                 "broken": len(checks.broken),
                 "warnings": len(checks.warnings),

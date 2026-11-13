@@ -20,38 +20,54 @@ def build_report(store: Store, run_id: int) -> dict:
     pages = store.get_pages(run_id)
     links = store.get_links(run_id)
     checks = store.get_checks_map(run_id)
+    inlink_counts = store.inlink_counts(run_id)
     broken: list[dict] = []
     anchors: list[dict] = []
     sources_with_internal: set[str] = set()
     for link in links:
+        # ``source_list`` carries every source page of a deduplicated edge;
+        # legacy rows synthesise a single entry from their own columns.
+        source_list = link.get("source_list") or [
+            {
+                "source_url": link["source_url"],
+                "raw_href": link["raw_href"],
+                "line_no": link["line_no"],
+                "anchor": link.get("anchor", ""),
+            }
+        ]
         if link["scope"] == "internal":
-            sources_with_internal.add(link["source_url"])
+            sources_with_internal.update(
+                source["source_url"] for source in source_list
+            )
         check = checks.get(link["target_url"])
         if check is None:
             continue
         if not check["ok"]:
-            broken.append(
-                {
-                    "source_url": link["source_url"],
-                    "target_url": link["target_url"],
-                    "raw_href": link["raw_href"],
-                    "kind": link["kind"],
-                    "scope": link["scope"],
-                    "line_no": link["line_no"],
-                    "status_code": check["status_code"],
-                    "error": check["error"],
-                    "final_url": check["final_url"],
-                }
-            )
+            for source in source_list:
+                broken.append(
+                    {
+                        "source_url": source["source_url"],
+                        "target_url": link["target_url"],
+                        "raw_href": source.get("raw_href", link["raw_href"]),
+                        "kind": link["kind"],
+                        "scope": link["scope"],
+                        "line_no": source.get("line_no", link["line_no"]),
+                        "status_code": check["status_code"],
+                        "error": check["error"],
+                        "final_url": check["final_url"],
+                        "sources": link.get("sources", 1),
+                    }
+                )
         if not check["anchor_ok"]:
-            anchors.append(
-                {
-                    "source_url": link["source_url"],
-                    "target_url": link["target_url"],
-                    "anchor": link["anchor"],
-                    "line_no": link["line_no"],
-                }
-            )
+            for source in source_list:
+                anchors.append(
+                    {
+                        "source_url": source["source_url"],
+                        "target_url": link["target_url"],
+                        "anchor": source.get("anchor", link.get("anchor", "")),
+                        "line_no": source.get("line_no", link["line_no"]),
+                    }
+                )
     redirects = []
     for check in checks.values():
         if check["redirect_chain"]:
@@ -82,6 +98,11 @@ def build_report(store: Store, run_id: int) -> dict:
         "unlisted": findings.get("unlisted", []),
     }
     warnings = [check for check in checks.values() if check["ok"] and check["error"]]
+    inlinks = [
+        {"target_url": url, "sources": count}
+        for url, count in inlink_counts.items()
+    ]
+    inlinks.sort(key=lambda item: (-item["sources"], item["target_url"]))
     data = {
         "run": {
             "id": run["id"],
@@ -95,6 +116,7 @@ def build_report(store: Store, run_id: int) -> dict:
             "pages": len(pages),
             "reachable_pages": len(reachable),
             "links": len(links),
+            "link_refs": sum(link.get("sources", 1) for link in links),
             "checks": len(checks),
             "broken": len(broken),
             "redirects": len(redirects),
@@ -110,6 +132,7 @@ def build_report(store: Store, run_id: int) -> dict:
         "anchors": anchors,
         "orphans": orphan_report,
         "dead_ends": dead_ends,
+        "inlinks": inlinks,
     }
     return data
 

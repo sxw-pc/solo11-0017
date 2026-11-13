@@ -13,6 +13,7 @@ from typing import Iterable
 from .config import ConfigError
 from .extractor import ExtractedLink, extract_links
 from .fetcher import FetchResult, Fetcher
+from .linkgraph import LinkGraph
 from .robots import RobotsCache
 from .urlnorm import (
     in_path_scope,
@@ -74,6 +75,7 @@ class CrawlResult:
     seed: str
     pages: dict[str, PageRecord] = field(default_factory=dict)
     stats: CrawlStats = field(default_factory=CrawlStats)
+    link_graph: LinkGraph = field(default_factory=LinkGraph)
 
     def iter_links(self) -> Iterable[tuple[str, ExtractedLink]]:
         for page in self.pages.values():
@@ -208,6 +210,8 @@ class Crawler:
         )
         result.pages[url] = page
         result.stats.fetched = len(result.pages)
+        for link in links:
+            result.link_graph.add(url, link)
         for link in links:
             if link.kind != "page" or link.scope != "internal":
                 continue
